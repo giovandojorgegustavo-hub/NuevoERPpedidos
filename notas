@@ -1,0 +1,6 @@
+cd ~/Documentos/PedidosERP
+git status                                 # verás los 3 archivos pendientes
+git add lib/src/auth/auth_page.dart lib/src/shell/shell_page.dart notas
+git commit -m "Ajusta login móvil y navegación compacta"
+git pull --rebase origin main              # trae cambios remotos si los hay
+git push origin main
