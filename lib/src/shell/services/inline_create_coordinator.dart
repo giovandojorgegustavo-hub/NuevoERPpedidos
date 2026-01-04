@@ -141,6 +141,15 @@ class InlineCreateCoordinator {
   }) async {
     final formBuilder = _formConfigBuilderResolver();
     if (formBuilder == null) return;
+    if (_isFabricacionCancelada(parentSectionId, parentRow)) {
+      _showMessage('No puedes modificar una fabricación cancelada.');
+      return;
+    }
+    if (parentSectionId == 'compras' &&
+        _inlineCreationPolicy.compraCancelada(parentRow)) {
+      _showMessage('No puedes modificar una compra cancelada.');
+      return;
+    }
     bool shouldClearViajeContext = false;
     try {
       if (!_canCreatePedidoInline(parentSectionId, inline, parentRow)) {
@@ -196,12 +205,34 @@ class InlineCreateCoordinator {
           )) {
         return;
       }
-      if (inline.id == 'compras_detalle' &&
-          _inlineCreationPolicy.compraTieneMovimientos(effectiveParentRow)) {
+      if (inline.id == 'compras_detalle') {
+        if (_inlineCreationPolicy.compraDetalleCerrado(effectiveParentRow)) {
+          _showMessage('No puedes modificar el detalle de una compra cerrada.');
+          return;
+        }
+        if (_inlineCreationPolicy.compraTieneMovimientos(effectiveParentRow)) {
+          _showMessage(
+            'No puedes modificar el detalle de una compra con movimientos registrados.',
+          );
+          return;
+        }
+      }
+      if (inline.id == 'compras_movimiento_detalle' &&
+          _inlineCreationPolicy.movimientoDetalleCerrado(
+            effectiveParentRow,
+          )) {
         _showMessage(
-          'No puedes modificar el detalle de una compra con movimientos registrados.',
+          'No puedes modificar el detalle de un movimiento cerrado.',
         );
         return;
+      }
+      if (inline.id == 'compras_movimiento_detalle') {
+        final compraEstado =
+            effectiveParentRow['compra_estado']?.toString().toLowerCase().trim();
+        if (compraEstado == 'cancelado') {
+          _showMessage('No puedes modificar movimientos de una compra cancelada.');
+          return;
+        }
       }
       final bool isMovimientoDetalle =
           inline.id == 'movimientos_detalle' ||
@@ -396,7 +427,8 @@ class InlineCreateCoordinator {
                         } else if (inline.id == 'movimientos_detalle' ||
                             inline.id == 'pedidos_detalle' ||
                             inline.id == 'compras_detalle' ||
-                            inline.id == 'compras_movimiento_detalle') {
+                            inline.id == 'compras_movimiento_detalle' ||
+                            inline.id == 'fabricaciones_internas_resultados') {
                           uniqueField = 'idproducto';
                         }
                         if (uniqueField != null) {
@@ -586,6 +618,16 @@ class InlineCreateCoordinator {
         _inlineContextCoordinator.clearViajeDetalleContext();
       }
     }
+  }
+
+  bool _isFabricacionCancelada(String sectionId, Map<String, dynamic> row) {
+    if (sectionId != 'fabricaciones_internas' &&
+        sectionId != 'fabricaciones_maquila') {
+      return false;
+    }
+    final estadoRaw = row['estado_codigo'] ?? row['estado'];
+    final estado = estadoRaw?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
   }
 
   Future<Map<String, double>?> _ensureMovimientoBaseReady({

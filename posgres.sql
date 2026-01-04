@@ -1389,6 +1389,8 @@ $$;
 -------------------------------------------------
 
 do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1 from pg_trigger where tgname = 'on_auth_user_created_perfil'
@@ -1953,6 +1955,154 @@ before update of estado on public.pedidos
 for each row
 execute function public.fn_pedidos_block_cancel();
 
+create or replace function public.fn_pedidos_cancelar(
+  p_idpedido uuid,
+  p_estado_admin text default 'cancelado_cliente',
+  p_motivo text default null,
+  p_usuario uuid default null
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_pedido public.pedidos%rowtype;
+  v_reg_at timestamptz := now();
+  v_reg_por uuid;
+  v_motivo text;
+begin
+  if p_idpedido is null then
+    raise exception 'Pedido requerido.';
+  end if;
+
+  select *
+    into v_pedido
+  from public.pedidos
+  where id = p_idpedido
+  for update;
+
+  if not found then
+    raise exception 'No se encontró el pedido.';
+  end if;
+
+  if v_pedido.estado = 'cancelado' then
+    return;
+  end if;
+
+  if p_estado_admin is not null
+      and p_estado_admin not in ('anulado_error','cancelado_cliente') then
+    raise exception 'Estado admin inválido para cancelación.';
+  end if;
+
+  v_reg_por := coalesce(
+    p_usuario,
+    auth.uid(),
+    v_pedido.editado_por,
+    v_pedido.registrado_por
+  );
+  v_motivo := nullif(btrim(p_motivo), '');
+  if v_motivo is null then
+    v_motivo := case
+      when p_estado_admin = 'anulado_error' then 'Anulado por error'
+      when p_estado_admin = 'cancelado_cliente' then 'Cancelado por cliente'
+      else 'Cancelacion de pedido'
+    end;
+  end if;
+  perform set_config('erp.pedido_evento_motivo', v_motivo, true);
+
+  if exists (
+    select 1
+    from public.movimientopedidos mp
+    join public.viajesdetalles vd on vd.idmovimiento = mp.id
+    where mp.idpedido = p_idpedido
+      and vd.llegada_at is not null
+    limit 1
+  ) then
+    raise exception
+      'No puedes cancelar el pedido mientras tenga movimientos con llegada registrada.';
+  end if;
+
+  if exists (
+    select 1
+    from public.movimientopedidos mp
+    join public.viajesdetalles vd on vd.idmovimiento = mp.id
+    where mp.idpedido = p_idpedido
+    limit 1
+  ) then
+    raise exception
+      'No puedes cancelar el pedido mientras tenga movimientos asignados a viajes.';
+  end if;
+
+  update public.detallemovimientopedidos dmp
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  from public.movimientopedidos mp
+  where mp.id = dmp.idmovimiento
+    and mp.idpedido = p_idpedido
+    and dmp.estado <> 'cancelado';
+
+  update public.movimientopedidos
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where idpedido = p_idpedido
+    and estado <> 'cancelado';
+
+  if exists (
+    select 1
+    from (
+      select
+        coalesce(env.idproducto, dev.idproducto) as idproducto,
+        coalesce(env.enviado, 0)::numeric(12,2)
+        - coalesce(dev.devuelto, 0)::numeric(12,2) as neto
+      from (
+        select dmp.idproducto, sum(dmp.cantidad)::numeric(12,2) as enviado
+        from public.movimientopedidos mp
+        join public.detallemovimientopedidos dmp on dmp.idmovimiento = mp.id
+        where mp.idpedido = p_idpedido
+          and mp.estado = 'activo'
+          and dmp.estado = 'activo'
+        group by dmp.idproducto
+      ) env
+      full join (
+        select dmp.idproducto, sum(vdd.cantidad)::numeric(12,2) as devuelto
+        from public.viajes_devueltos vd
+        join public.viajes_devueltos_detalle vdd on vdd.iddevuelto = vd.id
+        join public.detallemovimientopedidos dmp on dmp.id = vdd.iddetalle_movimiento
+        where vd.idpedido = p_idpedido
+          and vd.estado = 'devuelto_base'
+        group by dmp.idproducto
+      ) dev on dev.idproducto = env.idproducto
+    ) totales
+    where totales.neto <> 0
+  ) then
+    raise exception
+      'No puedes cancelar el pedido porque el neto enviado no esta conciliado.';
+  end if;
+
+  update public.detallepedidos
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where idpedido = p_idpedido
+    and estado <> 'cancelado';
+
+  update public.pagos
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where idpedido = p_idpedido
+    and estado <> 'cancelado';
+
+  update public.pedidos
+    set estado = 'cancelado',
+        estado_admin = coalesce(p_estado_admin, estado_admin),
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where id = p_idpedido;
+end;
+$$;
+
 
 
 -------------------------------------------------
@@ -2006,6 +2156,8 @@ alter table if exists public.movimientopedidos
     check (estado in ('activo','cancelado'));
 
 do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1
@@ -2027,6 +2179,8 @@ begin
 end $$;
 
 do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1
@@ -2305,6 +2459,81 @@ create trigger trg_movimientopedidos_block_cancel
 before update of estado on public.movimientopedidos
 for each row
 execute function public.fn_movimientopedidos_block_cancel();
+
+create or replace function public.fn_pedidos_movimiento_cancelar(
+  p_movimiento_id uuid,
+  p_usuario uuid default null
+)
+returns void
+language plpgsql
+as $$
+declare
+  v_mov public.movimientopedidos%rowtype;
+  v_reg_at timestamptz;
+  v_reg_por uuid;
+begin
+  if p_movimiento_id is null then
+    raise exception 'Movimiento requerido.';
+  end if;
+
+  select *
+    into v_mov
+  from public.movimientopedidos
+  where id = p_movimiento_id
+  for update;
+
+  if not found then
+    return;
+  end if;
+
+  if v_mov.estado = 'cancelado' then
+    return;
+  end if;
+
+  if exists (
+    select 1
+    from public.viajesdetalles vd
+    where vd.idmovimiento = p_movimiento_id
+      and vd.llegada_at is not null
+    limit 1
+  ) then
+    raise exception
+      'No puedes cancelar el movimiento porque ya tiene llegada registrada.';
+  end if;
+
+  if exists (
+    select 1
+    from public.viajesdetalles vd
+    where vd.idmovimiento = p_movimiento_id
+    limit 1
+  ) then
+    raise exception
+      'No puedes cancelar el movimiento porque ya fue asignado a un viaje.';
+  end if;
+
+  v_reg_por := coalesce(
+    p_usuario,
+    v_mov.editado_por,
+    v_mov.registrado_por,
+    auth.uid()
+  );
+  v_reg_at := coalesce(v_mov.editado_at, v_mov.registrado_at, now());
+
+  update public.detallemovimientopedidos
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where idmovimiento = p_movimiento_id
+    and estado <> 'cancelado';
+
+  update public.movimientopedidos
+    set estado = 'cancelado',
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where id = p_movimiento_id
+    and estado <> 'cancelado';
+end;
+$$;
 
 create or replace function public.fn_detallemovimientopedidos_block_entrega()
 returns trigger
@@ -2752,6 +2981,20 @@ where public.fn_es_admin()
       and cba.activo = true
   );
 
+create or replace function public.fn_cuentas_bancarias_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar cuentas bancarias; desactiva la cuenta.';
+end;
+$$;
+
+create trigger trg_cuentas_bancarias_prevent_delete
+before delete on public.cuentas_bancarias
+for each row
+execute function public.fn_cuentas_bancarias_prevent_delete();
+
 alter table public.cuentas_bancarias_asignadas enable row level security;
 
 create policy cuentas_bancarias_asignadas_admin_full
@@ -2987,7 +3230,7 @@ as $$
       )
       from public.viajes_devueltos vd
       where vd.idpedido = p_idpedido
-        and vd.estado <> 'pendiente'
+        and vd.estado = 'devuelto_base'
     ), 0)
     + coalesce((
       select count(*) * 50.00
@@ -3042,6 +3285,20 @@ create trigger trg_pagos_block_sobrepago
 before insert or update on public.pagos
 for each row
 execute function public.fn_pagos_block_sobrepago();
+
+create or replace function public.fn_pagos_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar pagos; usa cancelar.';
+end;
+$$;
+
+create trigger trg_pagos_prevent_delete
+before delete on public.pagos
+for each row
+execute function public.fn_pagos_prevent_delete();
 
 create table if not exists movimientos_financieros (
   id uuid primary key default gen_random_uuid(),
@@ -3769,71 +4026,6 @@ select
   monto as saldo
 from public.vw_gl_balance_sheet;
 
-create or replace view public.v_contabilidad_historial as
-with reversal_evidence as (
-  select
-    rev.id as reversal_id,
-    rev.source_id as original_id,
-    lower(btrim(split_part(rev.descripcion, 'Motivo:', 2))) as motivo,
-    (
-      lower(btrim(split_part(rev.descripcion, 'Motivo:', 2)))
-      ~ '(correccion|reversar|reversad)'
-    ) as explicit_action
-  from public.gl_journal_entries rev
-  where rev.source_prefix = 'reversal'
-),
-reversal_flags as (
-  select
-    entry_id,
-    bool_or(explicit_action) as explicit_action
-  from (
-    select reversal_id as entry_id, explicit_action
-    from reversal_evidence
-    union all
-    select original_id as entry_id, explicit_action
-    from reversal_evidence
-    where original_id is not null
-  ) as mapped
-  group by entry_id
-)
-select
-  l.line_id as id,
-  l.entry_id,
-  e.source_prefix,
-  e.source_id,
-  e.source_key,
-  e.estado,
-  l.periodo_contable as periodo,
-  timezone('America/Lima', l.posted_at) as fecha_at,
-  to_char(
-    timezone('America/Lima', l.posted_at),
-    'YYYY-MM-DD HH24:MI:SS'
-  ) as fecha,
-  l.account_id as idcuenta_contable,
-  l.cuenta_codigo as cuenta_contable_codigo,
-  l.cuenta_nombre as cuenta_contable_nombre,
-  l.cuenta_tipo as cuenta_tipo,
-  case
-    when e.source_prefix = 'reversal' or e.estado = 'reversed'
-      then 'Correccion'
-    else 'Evento'
-  end as tipo,
-  case
-    when e.source_prefix = 'reversal' or e.estado = 'reversed'
-      then not coalesce(reversal_flags.explicit_action, false)
-    else false
-  end as alerta,
-  e.descripcion,
-  l.memo,
-  l.debit as debe,
-  l.credit as haber,
-  l.saldo_acumulado
-from public.vw_gl_ledger l
-join public.gl_journal_entries e on e.id = l.entry_id
-left join reversal_flags on reversal_flags.entry_id = e.id
-where e.estado in ('posted','reversed')
-order by l.posted_at desc, l.entry_id desc, l.line_id desc;
-
 -------------------------------------------------
 -- 6. Permisos por modulo (contabilidad)
 -------------------------------------------------
@@ -4035,6 +4227,20 @@ create trigger trg_movimientos_financieros_protect_posted
 before update or delete on public.movimientos_financieros
 for each row
 execute function public.fn_movimientos_financieros_protect_posted();
+
+create or replace function public.fn_movimientos_financieros_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar movimientos financieros; usa reversas.';
+end;
+$$;
+
+create trigger trg_movimientos_financieros_prevent_delete
+before delete on public.movimientos_financieros
+for each row
+execute function public.fn_movimientos_financieros_prevent_delete();
 
 create or replace function public.fn_movimientos_financieros_reversar(
   p_movimiento_id uuid,
@@ -4541,6 +4747,8 @@ create table if not exists gastos_operativos (
 );
 
 do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1
@@ -4744,6 +4952,20 @@ before insert or update or delete on public.gastos_operativos
 for each row
 execute function public.fn_gastos_operativos_sync_movimiento();
 
+create or replace function public.fn_gastos_operativos_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar gastos operativos.';
+end;
+$$;
+
+create trigger trg_gastos_operativos_prevent_delete
+before delete on public.gastos_operativos
+for each row
+execute function public.fn_gastos_operativos_prevent_delete();
+
 create or replace function public.fn_pedidos_sync_asientos(p_idpedido uuid)
 returns void
 language plpgsql
@@ -4805,7 +5027,7 @@ begin
     into v_total_devoluciones_cargos
   from public.viajes_devueltos vd
   where vd.idpedido = p_idpedido
-    and vd.estado <> 'pendiente';
+    and vd.estado = 'devuelto_base';
 
   select coalesce(sum(case when m.es_provincia then 1 else 0 end), 0)::integer
     into v_movs_prov
@@ -5595,7 +5817,7 @@ begin
         and source_prefix = 'cobro_cliente'
         and estado = 'posted'
     loop
-      perform public.fn_gl_reverse_entry(v_old.id, 'Pago cancelado', 'auto');
+      perform public.fn_gl_reverse_entry(v_old.id, 'Pago cancelado', 'current_period');
     end loop;
 
     update public.pagos
@@ -5631,7 +5853,7 @@ begin
         and source_prefix = 'cobro_cliente'
         and estado = 'posted'
     loop
-      perform public.fn_gl_reverse_entry(v_old.id, 'Pago eliminado', 'auto');
+      perform public.fn_gl_reverse_entry(v_old.id, 'Pago eliminado', 'current_period');
     end loop;
     return old;
   end if;
@@ -5661,7 +5883,7 @@ begin
         and source_prefix = 'cobro_cliente'
         and estado = 'posted'
     loop
-      perform public.fn_gl_reverse_entry(v_old.id, 'Pago sin cuenta', 'auto');
+      perform public.fn_gl_reverse_entry(v_old.id, 'Pago sin cuenta', 'current_period');
     end loop;
 
     update public.pagos
@@ -5869,6 +6091,20 @@ create trigger trg_pedidos_cleanup_asientos
 before delete on public.pedidos
 for each row
 execute function public.fn_pedidos_cleanup_asientos();
+
+create or replace function public.fn_pedidos_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar pedidos; usa cancelar.';
+end;
+$$;
+
+create trigger trg_pedidos_prevent_delete
+before delete on public.pedidos
+for each row
+execute function public.fn_pedidos_prevent_delete();
 
 create trigger trg_pagos_sync_movimientos
 after insert or update or delete on public.pagos
@@ -6123,8 +6359,11 @@ create table if not exists proveedores (
 -- ============================================
 -- 6.2 COMPRAS
 -- ============================================
+create sequence if not exists public.compras_correlativo_seq;
+
 create table if not exists compras (
   id uuid primary key default gen_random_uuid(),
+  correlativo bigint not null default nextval('public.compras_correlativo_seq'),
   idproveedor uuid not null references proveedores(id),
   observacion text,
   registrado_at timestamptz default now(),
@@ -6133,14 +6372,87 @@ create table if not exists compras (
   editado_por    uuid references auth.users(id),
   estado_contable text not null default 'draft'
     check (estado_contable in ('draft','posted')),
+  estado text not null default 'activo'
+    check (estado in ('activo','cancelado')),
+  detalle_cerrado boolean not null default false,
   idasiento_transito uuid unique references gl_journal_entries(id) on delete set null,
   idasiento_inventario uuid unique references gl_journal_entries(id) on delete set null,
   idasiento_pasivo uuid unique references gl_journal_entries(id) on delete set null
 );
 
+do $$
+declare
+  v_max bigint;
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'compras'
+      and column_name = 'correlativo'
+  ) then
+    alter table public.compras
+      add column correlativo bigint;
+  end if;
+  alter table public.compras
+    alter column correlativo
+      set default nextval('public.compras_correlativo_seq');
+  with base as (
+    select coalesce(max(correlativo), 0) as offset
+    from public.compras
+    where correlativo is not null
+  ),
+  ordered as (
+    select id, row_number() over (order by registrado_at, id) as rn
+    from public.compras
+    where correlativo is null
+  )
+  update public.compras c
+  set correlativo = base.offset + ordered.rn
+  from ordered, base
+  where c.id = ordered.id;
+  select coalesce(max(correlativo), 0)
+    into v_max
+  from public.compras;
+  if v_max < 1 then
+    perform setval('public.compras_correlativo_seq', 1, false);
+  else
+    perform setval('public.compras_correlativo_seq', v_max, true);
+  end if;
+  alter table public.compras
+    alter column correlativo set not null;
+end;
+$$;
+
 alter table if exists public.compras
   add column if not exists estado_contable text not null default 'draft'
     check (estado_contable in ('draft','posted'));
+
+alter table if exists public.compras
+  add column if not exists estado text not null default 'activo'
+    check (estado in ('activo','cancelado'));
+
+alter table if exists public.compras
+  add column if not exists detalle_cerrado boolean not null default false;
+
+update public.compras
+set estado = 'activo'
+where estado is null;
+
+do $$
+begin
+  if to_regclass('public.compras_detalle') is not null then
+    update public.compras
+    set detalle_cerrado = true
+    where detalle_cerrado = false
+      and exists (
+        select 1
+        from public.compras_detalle cd
+        where cd.idcompra = public.compras.id
+      );
+  end if;
+end;
+$$;
 
 alter table if exists public.compras
   add column if not exists contable_version integer not null default 1;
@@ -6157,7 +6469,7 @@ begin
     end if;
     if new.estado_contable = 'posted'
         and current_setting('erp.compras_confirmar', true) is distinct from '1' then
-      raise exception 'Usa fn_compras_confirmar para postear compras.';
+      raise exception 'El estado contable de compras se gestiona automaticamente.';
     end if;
   end if;
   return new;
@@ -6168,6 +6480,55 @@ create trigger trg_compras_estado_contable_guard
 before update on public.compras
 for each row
 execute function public.fn_compras_estado_contable_guard();
+
+create or replace function public.fn_compras_detalle_cerrado_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.detalle_cerrado and new.detalle_cerrado is distinct from old.detalle_cerrado then
+    raise exception 'No se puede reabrir el detalle de una compra.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_detalle_cerrado_guard
+before update of detalle_cerrado on public.compras
+for each row
+when (old.detalle_cerrado is distinct from new.detalle_cerrado)
+execute function public.fn_compras_detalle_cerrado_guard();
+
+create or replace function public.fn_compras_cancelada_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.estado = 'cancelado' and new.estado = old.estado then
+    if current_setting('erp.compras_cancelar', true) = '1' then
+      return new;
+    end if;
+    if new.idproveedor is distinct from old.idproveedor
+        or new.observacion is distinct from old.observacion
+        or new.estado_contable is distinct from old.estado_contable
+        or new.contable_version is distinct from old.contable_version
+        or new.detalle_cerrado is distinct from old.detalle_cerrado
+        or new.idasiento_transito is distinct from old.idasiento_transito
+        or new.idasiento_inventario is distinct from old.idasiento_inventario
+        or new.idasiento_pasivo is distinct from old.idasiento_pasivo then
+      raise exception 'No se puede editar una compra cancelada.';
+    end if;
+  elsif old.estado = 'cancelado' and new.estado is distinct from old.estado then
+    raise exception 'No se puede cambiar el estado de una compra cancelada.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_cancelada_guard
+before update on public.compras
+for each row
+execute function public.fn_compras_cancelada_guard();
 
 create table if not exists compras_detalle (
   id uuid primary key default gen_random_uuid(),
@@ -6272,7 +6633,7 @@ begin
         perform public.fn_gl_reverse_entry(
           v_old.id,
           v_motivo,
-          'auto'
+          'current_period'
         );
       end loop;
       new.idmovimiento_financiero := null;
@@ -6322,7 +6683,7 @@ begin
       perform public.fn_gl_reverse_entry(
         v_old.id,
         v_motivo,
-        'auto'
+        'current_period'
       );
     end loop;
   end if;
@@ -6531,13 +6892,15 @@ declare
   v_desc text;
   v_reg_at timestamptz;
   v_reg_por uuid;
-  v_transito_id uuid;
-  v_pasivo_id uuid;
   v_amount_total numeric(18,2);
   v_amount_transito numeric(18,2);
   v_source_prefix text := 'compra';
   v_source_key text;
   v_entry_id uuid;
+  v_motivo text := 'Recalculo compra';
+  v_version integer;
+  v_max_version integer;
+  v_old record;
 begin
   select
     c.id,
@@ -6557,10 +6920,6 @@ begin
   where c.id = p_idcompra;
 
   if not found then
-    return;
-  end if;
-
-  if v_compra.estado_contable = 'posted' then
     return;
   end if;
 
@@ -6589,12 +6948,19 @@ begin
   v_reg_at := coalesce(v_compra.registrado_at, now());
   v_reg_por := coalesce(v_compra.registrado_por, auth.uid());
 
-  v_transito_id := null;
-  v_pasivo_id := null;
   v_amount_transito := round(v_transito_monto::numeric, 2);
   v_amount_total := round(v_amount_transito, 2);
 
   if v_amount_total <= 0 then
+    for v_old in
+      select id
+      from public.gl_journal_entries
+      where source_id = p_idcompra
+        and source_prefix = v_source_prefix
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_old.id, v_motivo);
+    end loop;
     delete from public.gl_journal_entries
     where source_id = p_idcompra
       and source_prefix = v_source_prefix
@@ -6607,22 +6973,47 @@ begin
     return;
   end if;
 
-  if exists (
-    select 1
+  select coalesce(
+      max(
+        case
+          when source_key ~ ':v[0-9]+$' then (regexp_match(source_key, ':v([0-9]+)$'))[1]::int
+          else 1
+        end
+      ),
+      0
+    )
+    into v_max_version
+  from public.gl_journal_entries
+  where source_id = p_idcompra
+    and source_prefix = v_source_prefix;
+
+  v_version := case
+    when v_max_version >= 1 then v_max_version + 1
+    else 1
+  end;
+  update public.compras
+    set contable_version = v_version
+  where id = p_idcompra;
+
+  for v_old in
+    select id
     from public.gl_journal_entries
     where source_id = p_idcompra
       and source_prefix = v_source_prefix
-      and estado in ('posted','reversed')
-  ) then
-    raise exception 'Compra % ya tiene asiento posteado; usa correccion.', p_idcompra;
-  end if;
+      and estado = 'posted'
+  loop
+    perform public.fn_gl_reverse_entry(v_old.id, v_motivo);
+  end loop;
 
   delete from public.gl_journal_entries
   where source_id = p_idcompra
     and source_prefix = v_source_prefix
     and estado = 'draft';
 
-  v_source_key := concat(v_source_prefix, ':', p_idcompra::text);
+  v_source_key := case
+    when v_version = 1 then concat(v_source_prefix, ':', p_idcompra::text)
+    else concat(v_source_prefix, ':', p_idcompra::text, ':v', v_version::text)
+  end;
   v_entry_id := public.fn_gl_create_entry(
     p_source_prefix := v_source_prefix,
     p_source_id := p_idcompra,
@@ -6645,16 +7036,15 @@ begin
       )
     ),
     p_created_by := v_reg_por,
-    p_post := false
+    p_post := true
   );
 
-  v_transito_id := v_entry_id;
-  v_pasivo_id := v_entry_id;
-
+  perform set_config('erp.compras_confirmar', '1', true);
   update public.compras
-    set idasiento_transito = v_transito_id,
+    set estado_contable = 'posted',
+        idasiento_transito = v_entry_id,
         idasiento_inventario = null,
-        idasiento_pasivo = v_pasivo_id
+        idasiento_pasivo = v_entry_id
   where id = p_idcompra;
 end;
 $$;
@@ -6692,23 +7082,9 @@ begin
   from public.gl_journal_entries
   where source_id = p_idcompra
     and source_prefix = 'compra'
-    and estado = 'draft'
+    and estado = 'posted'
   order by created_at desc
   limit 1;
-
-  if v_entry_id is null then
-    raise exception 'No hay asiento en borrador para confirmar compra %.', p_idcompra;
-  end if;
-
-  perform public.fn_gl_post_entry(v_entry_id);
-
-  perform set_config('erp.compras_confirmar', '1', true);
-  update public.compras
-    set estado_contable = 'posted',
-        idasiento_transito = v_entry_id,
-        idasiento_inventario = null,
-        idasiento_pasivo = v_entry_id
-  where id = p_idcompra;
 
   return v_entry_id;
 end;
@@ -7098,6 +7474,7 @@ create table if not exists compras_movimientos (
   idcompra uuid not null references compras(id) on delete cascade,
   idbase uuid not null references bases(id),
   observacion text,
+  detalle_cerrado boolean not null default false,
   registrado_at timestamptz default now(),
   editado_at     timestamptz,
   registrado_por uuid references auth.users(id),
@@ -7145,10 +7522,272 @@ create table if not exists compras_reversion_movimientos (
   registrado_por uuid references auth.users(id)
 );
 
+create table if not exists compras_eventos (
+  id uuid primary key default gen_random_uuid(),
+  idcompra uuid not null references compras(id) on delete cascade,
+  tipo text not null
+    check (tipo in ('compra_cancelada','pago_reversado','movimiento_reversado')),
+  referencia_id uuid,
+  registrado_at timestamptz default now(),
+  registrado_por uuid references auth.users(id)
+);
+
+create index if not exists idx_compras_eventos_compra
+  on public.compras_eventos (idcompra);
+
+alter table if exists public.compras_movimientos
+  add column if not exists detalle_cerrado boolean not null default false;
+
+update public.compras_movimientos
+set detalle_cerrado = true
+where detalle_cerrado = false
+  and exists (
+    select 1
+    from public.compras_movimiento_detalle cmd
+    where cmd.idmovimiento = public.compras_movimientos.id
+  );
+
 alter table public.compras_movimientos
   add column if not exists es_reversion boolean not null default false,
   add column if not exists idmovimiento_origen uuid references public.compras_movimientos(id),
   add column if not exists reversion_id uuid references public.compras_reversiones(id);
+
+create or replace view public.v_contabilidad_historial as
+select
+  l.line_id as id,
+  l.entry_id,
+  e.source_prefix,
+  e.source_id,
+  e.source_key,
+  e.estado,
+  l.periodo_contable as periodo,
+  timezone('America/Lima', l.posted_at) as fecha_at,
+  to_char(
+    timezone('America/Lima', l.posted_at),
+    'YYYY-MM-DD HH24:MI:SS'
+  ) as fecha,
+  l.account_id as idcuenta_contable,
+  l.cuenta_codigo as cuenta_contable_codigo,
+  l.cuenta_nombre as cuenta_contable_nombre,
+  l.cuenta_tipo as cuenta_tipo,
+  case
+    when e.source_prefix = 'reversal'
+      or (
+        e.source_prefix = 'recepcion_compra'
+        and coalesce(cm.es_reversion, false)
+      )
+      then 'Correccion'
+    else 'Evento'
+  end as tipo,
+  case
+    when e.source_prefix = 'recepcion_compra'
+      and coalesce(cm.es_reversion, false)
+      then concat('Reversa: ', e.descripcion)
+    else e.descripcion
+  end as descripcion,
+  l.memo,
+  l.debit as debe,
+  l.credit as haber,
+  l.saldo_acumulado
+from public.vw_gl_ledger l
+join public.gl_journal_entries e on e.id = l.entry_id
+left join public.compras_movimientos cm
+  on cm.id = e.source_id
+ and e.source_prefix = 'recepcion_compra'
+where e.estado in ('posted','reversed')
+order by l.posted_at desc, l.entry_id desc, l.line_id desc;
+
+create or replace function public.fn_compras_evento_pago_reversado()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.estado = 'reversado' and old.estado is distinct from new.estado then
+    insert into public.compras_eventos (
+      idcompra,
+      tipo,
+      referencia_id,
+      registrado_at,
+      registrado_por
+    )
+    values (
+      new.idcompra,
+      'pago_reversado',
+      new.id,
+      coalesce(new.editado_at, now()),
+      coalesce(new.editado_por, new.registrado_por, auth.uid())
+    );
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_evento_pago_reversado
+after update of estado on public.compras_pagos
+for each row
+when (old.estado is distinct from new.estado)
+execute function public.fn_compras_evento_pago_reversado();
+
+create or replace function public.fn_compras_evento_movimiento_reversado()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.es_reversion then
+    insert into public.compras_eventos (
+      idcompra,
+      tipo,
+      referencia_id,
+      registrado_at,
+      registrado_por
+    )
+    values (
+      new.idcompra,
+      'movimiento_reversado',
+      new.id,
+      coalesce(new.registrado_at, now()),
+      coalesce(new.registrado_por, auth.uid())
+    );
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_evento_movimiento_reversado
+after insert on public.compras_movimientos
+for each row
+execute function public.fn_compras_evento_movimiento_reversado();
+
+create or replace function public.fn_compras_movimiento_reversar(
+  p_movimiento_id uuid,
+  p_motivo text default null
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_mov public.compras_movimientos%rowtype;
+  v_reverso_id uuid;
+  v_existing uuid;
+  v_obs text;
+  v_reg_at timestamptz;
+  v_reg_por uuid;
+begin
+  if p_movimiento_id is null then
+    return null;
+  end if;
+
+  select *
+    into v_mov
+  from public.compras_movimientos
+  where id = p_movimiento_id
+  for update;
+
+  if not found then
+    return null;
+  end if;
+
+  if v_mov.es_reversion then
+    return v_mov.id;
+  end if;
+
+  select id
+    into v_existing
+  from public.compras_movimientos
+  where idmovimiento_origen = v_mov.id
+    and es_reversion = true
+  limit 1;
+
+  if v_existing is not null then
+    return v_existing;
+  end if;
+
+  v_obs := coalesce(nullif(p_motivo, ''), 'Reversa movimiento compra');
+  v_reg_at := now();
+  v_reg_por := coalesce(auth.uid(), v_mov.editado_por, v_mov.registrado_por);
+
+  insert into public.compras_movimientos (
+    idcompra,
+    idbase,
+    observacion,
+    es_reversion,
+    idmovimiento_origen,
+    registrado_at,
+    registrado_por,
+    detalle_cerrado
+  )
+  values (
+    v_mov.idcompra,
+    v_mov.idbase,
+    v_obs,
+    true,
+    v_mov.id,
+    v_reg_at,
+    v_reg_por,
+    false
+  )
+  returning id into v_reverso_id;
+
+  insert into public.compras_movimiento_detalle (
+    idmovimiento,
+    idproducto,
+    cantidad,
+    registrado_at,
+    registrado_por
+  )
+  select
+    v_reverso_id,
+    cmd.idproducto,
+    cmd.cantidad,
+    v_reg_at,
+    v_reg_por
+  from public.compras_movimiento_detalle cmd
+  where cmd.idmovimiento = v_mov.id;
+
+  update public.compras_movimientos
+    set detalle_cerrado = true,
+        editado_at = v_reg_at,
+        editado_por = v_reg_por
+  where id = v_reverso_id;
+
+  return v_reverso_id;
+end;
+$$;
+
+create or replace function public.fn_compras_movimiento_cerrado_guard()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.detalle_cerrado and new.detalle_cerrado is distinct from old.detalle_cerrado then
+    raise exception 'No se puede reabrir un movimiento de compra.';
+  end if;
+  if old.detalle_cerrado then
+    if current_setting('erp.compras_cancelar', true) = '1' then
+      if new.reversion_id is distinct from old.reversion_id
+          and new.idbase is not distinct from old.idbase
+          and new.observacion is not distinct from old.observacion
+          and new.es_reversion is not distinct from old.es_reversion
+          and new.idmovimiento_origen is not distinct from old.idmovimiento_origen then
+        return new;
+      end if;
+    end if;
+    if new.idbase is distinct from old.idbase
+        or new.observacion is distinct from old.observacion
+        or new.es_reversion is distinct from old.es_reversion
+        or new.idmovimiento_origen is distinct from old.idmovimiento_origen
+        or new.reversion_id is distinct from old.reversion_id then
+      raise exception 'No se puede editar un movimiento de compra cerrado.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_movimiento_cerrado_guard
+before update on public.compras_movimientos
+for each row
+execute function public.fn_compras_movimiento_cerrado_guard();
 
 create or replace function public.compras_movimiento_detalle_set_cost()
 returns trigger
@@ -7206,54 +7845,60 @@ declare
   v_cost_unit numeric(18,6);
   v_reg_at timestamptz;
 begin
-  if tg_op = 'DELETE' then
-    select
-      cm.idbase,
-      cm.idcompra,
-      cm.es_reversion
-    into v_mov
-    from public.compras_movimientos cm
-    where cm.id = old.idmovimiento;
-    if v_mov is null then
-      return old;
+  if tg_op = 'UPDATE' then
+    if new.idproducto is not distinct from old.idproducto
+        and new.cantidad is not distinct from old.cantidad
+        and new.costo_unitario is not distinct from old.costo_unitario
+        and new.costo_total is not distinct from old.costo_total
+        and new.idmovimiento is not distinct from old.idmovimiento then
+      return new;
     end if;
-    v_cantidad := coalesce(old.cantidad, 0);
-    v_total := coalesce(old.costo_total, 0);
-    if v_mov.es_reversion then
-      v_cantidad := -v_cantidad;
-      v_total := -v_total;
-    end if;
-    perform public.fn_costos_historial_upsert(
-      p_origen_tipo => 'compra_movimiento',
-      p_detalle_id => old.id,
-      p_origen_id => v_mov.idcompra,
-      p_idproducto => old.idproducto,
-      p_idbase => v_mov.idbase,
-      p_cantidad => v_cantidad,
-      p_costo_unitario => coalesce(old.costo_unitario, 0),
-      p_costo_total => v_total,
-      p_registrado_at => coalesce(old.editado_at, old.registrado_at, now()),
-      p_accion => 'delete'
-    );
-    return old;
   end if;
+
   select
     cm.idbase,
     cm.idcompra,
     cm.es_reversion
   into v_mov
   from public.compras_movimientos cm
-  where cm.id = new.idmovimiento;
+  where cm.id = coalesce(new.idmovimiento, old.idmovimiento);
   if v_mov is null then
-    return new;
+    return coalesce(new, old);
   end if;
+
+  if tg_op = 'DELETE' or tg_op = 'UPDATE' then
+    v_cantidad := coalesce(old.cantidad, 0);
+    v_total := coalesce(old.costo_total, 0);
+    if v_mov.es_reversion then
+      v_cantidad := -v_cantidad;
+      v_total := -v_total;
+    end if;
+    v_cost_unit := coalesce(old.costo_unitario, 0);
+    v_reg_at := coalesce(old.editado_at, old.registrado_at, now());
+    perform public.fn_costos_historial_upsert(
+      p_origen_tipo => 'compra_movimiento',
+      p_detalle_id => old.id,
+      p_origen_id => v_mov.idcompra,
+      p_idproducto => old.idproducto,
+      p_idbase => v_mov.idbase,
+      p_cantidad => -v_cantidad,
+      p_costo_unitario => v_cost_unit,
+      p_costo_total => -v_total,
+      p_registrado_at => v_reg_at,
+      p_accion => 'cancelar'
+    );
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
+  end if;
+
   v_cantidad := coalesce(new.cantidad, 0);
   v_total := coalesce(new.costo_total, 0);
   if v_mov.es_reversion then
     v_cantidad := -v_cantidad;
     v_total := -v_total;
   end if;
-  v_accion := case when tg_op = 'UPDATE' then 'update' else 'insert' end;
+  v_accion := case when v_mov.es_reversion then 'cancelar' else 'insert' end;
   v_product := new.idproducto;
   v_cost_unit := coalesce(new.costo_unitario, 0);
   v_reg_at := coalesce(new.editado_at, new.registrado_at, now());
@@ -7284,12 +7929,24 @@ language plpgsql
 as $$
 declare
   v_compra uuid := coalesce(new.idcompra, old.idcompra);
+  v_estado text;
+  v_detalle_cerrado boolean;
 begin
   if v_compra is null then
     return case
       when tg_op = 'DELETE' then old
       else new
     end;
+  end if;
+  select estado, detalle_cerrado
+    into v_estado, v_detalle_cerrado
+  from public.compras
+  where id = v_compra;
+  if v_estado = 'cancelado' then
+    raise exception 'No se puede modificar el detalle de una compra cancelada.';
+  end if;
+  if coalesce(v_detalle_cerrado, false) then
+    raise exception 'No se puede modificar el detalle de una compra cerrada.';
   end if;
   if exists (
     select 1
@@ -7311,23 +7968,79 @@ before insert or update or delete on public.compras_detalle
 for each row
 execute function public.fn_compras_detalle_lock_when_moved();
 
-create or replace function public.fn_compras_prevent_delete_with_movimientos()
+create or replace function public.fn_compras_movimiento_detalle_lock()
 returns trigger
 language plpgsql
 as $$
 declare
-  v_old record;
+  v_movimiento uuid := coalesce(new.idmovimiento, old.idmovimiento);
+  v_detalle_cerrado boolean;
+  v_estado_compra text;
+  v_es_reversion boolean;
 begin
-  for v_old in
-    select id
-    from public.gl_journal_entries
-    where source_id = old.id
-      and source_prefix = 'compra'
-      and estado = 'posted'
-  loop
-    perform public.fn_gl_reverse_entry(v_old.id, 'Compra eliminada');
-  end loop;
-  return old;
+  if v_movimiento is null then
+    return case
+      when tg_op = 'DELETE' then old
+      else new
+    end;
+  end if;
+  select
+    cm.detalle_cerrado,
+    c.estado,
+    cm.es_reversion
+  into v_detalle_cerrado, v_estado_compra, v_es_reversion
+  from public.compras_movimientos cm
+  join public.compras c on c.id = cm.idcompra
+  where cm.id = v_movimiento;
+  if v_estado_compra = 'cancelado' then
+    if tg_op = 'INSERT' and v_es_reversion = true then
+      return new;
+    end if;
+    if current_setting('erp.compras_cancelar', true) = '1' then
+      return case
+        when tg_op = 'DELETE' then old
+        else new
+      end;
+    end if;
+    raise exception
+      'No se puede modificar movimientos de una compra cancelada.';
+  end if;
+  if coalesce(v_detalle_cerrado, false) then
+    raise exception
+      'No se puede modificar el detalle de un movimiento cerrado.';
+  end if;
+  return case
+    when tg_op = 'DELETE' then old
+    else new
+  end;
+end;
+$$;
+
+create trigger trg_compras_movimiento_detalle_lock
+before insert or update or delete on public.compras_movimiento_detalle
+for each row
+execute function public.fn_compras_movimiento_detalle_lock();
+
+create or replace function public.fn_compras_movimientos_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar movimientos de compra; usa reversa.';
+end;
+$$;
+
+create trigger trg_compras_movimientos_prevent_delete
+before delete on public.compras_movimientos
+for each row
+execute function public.fn_compras_movimientos_prevent_delete();
+
+create or replace function public.fn_compras_prevent_delete_with_movimientos()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar compras; usa cancelar.';
 end;
 $$;
 
@@ -7335,6 +8048,128 @@ create trigger trg_compras_lock_delete
 before delete on public.compras
 for each row
 execute function public.fn_compras_prevent_delete_with_movimientos();
+
+create or replace function public.fn_compras_cancelar()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_pago record;
+  v_mov record;
+  v_entry record;
+  v_reversion_id uuid;
+  v_mov_reverso uuid;
+  v_reg_por uuid;
+  v_reg_at timestamptz;
+begin
+  if new.estado = 'cancelado' and old.estado is distinct from new.estado then
+    perform set_config('erp.compras_cancelar', '1', true);
+    v_reg_por := coalesce(new.editado_por, new.registrado_por, auth.uid());
+    v_reg_at := coalesce(new.editado_at, now());
+
+    insert into public.compras_reversiones (
+      idcompra,
+      observacion,
+      estado,
+      registrado_at,
+      aplicado_at,
+      registrado_por,
+      aplicado_por
+    )
+    values (
+      new.id,
+      'Cancelacion de compra',
+      'completada',
+      v_reg_at,
+      v_reg_at,
+      v_reg_por,
+      v_reg_por
+    )
+    returning id into v_reversion_id;
+
+    for v_pago in
+      select id
+      from public.compras_pagos
+      where idcompra = new.id
+        and estado = 'activo'
+    loop
+      perform public.fn_compras_pagos_reversar(v_pago.id);
+    end loop;
+
+    for v_mov in
+      select id
+      from public.compras_movimientos
+      where idcompra = new.id
+        and es_reversion = false
+    loop
+      v_mov_reverso := public.fn_compras_movimiento_reversar(
+        v_mov.id,
+        'Reversa por cancelacion'
+      );
+      if v_mov_reverso is not null then
+        update public.compras_movimientos
+          set reversion_id = v_reversion_id
+        where id = v_mov_reverso
+          and reversion_id is null;
+        insert into public.compras_reversion_movimientos (
+          idreversion,
+          idmovimiento_origen,
+          idmovimiento_reverso,
+          registrado_por
+        )
+        select
+          v_reversion_id,
+          v_mov.id,
+          v_mov_reverso,
+          v_reg_por
+        where not exists (
+          select 1
+          from public.compras_reversion_movimientos crm
+          where crm.idreversion = v_reversion_id
+            and crm.idmovimiento_origen = v_mov.id
+        );
+      end if;
+    end loop;
+
+    for v_entry in
+      select id
+      from public.gl_journal_entries
+      where source_id = new.id
+        and source_prefix = 'compra'
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_entry.id, 'Compra cancelada');
+    end loop;
+
+    update public.compras
+      set detalle_cerrado = true
+    where id = new.id
+      and detalle_cerrado is distinct from true;
+
+    insert into public.compras_eventos (
+      idcompra,
+      tipo,
+      referencia_id,
+      registrado_at,
+      registrado_por
+    )
+    values (
+      new.id,
+      'compra_cancelada',
+      new.id,
+      v_reg_at,
+      v_reg_por
+    );
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_compras_cancelar
+after update of estado on public.compras
+for each row
+when (old.estado is distinct from new.estado)
+execute function public.fn_compras_cancelar();
 
 -- ============================================
 -- 6.3 AJUSTES
@@ -7350,6 +8185,8 @@ create table if not exists ajustes (
 );
 
 do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1
@@ -7703,6 +8540,20 @@ before delete on public.ajustes
 for each row
 execute function public.fn_ajustes_cleanup_movimientos();
 
+create or replace function public.fn_ajustes_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar ajustes; registra un ajuste inverso.';
+end;
+$$;
+
+create trigger trg_ajustes_prevent_delete
+before delete on public.ajustes
+for each row
+execute function public.fn_ajustes_prevent_delete();
+
 -- ============================================
 -- 6.4 TRANSFERENCIAS ENTRE BASES
 -- ============================================
@@ -7792,14 +8643,33 @@ left join public.productos p on p.id = td.idproducto
 left join public.bases bo on bo.id = t.idbase_origen
 left join public.bases bd on bd.id = t.idbase_destino;
 
+create or replace function public.fn_transferencias_prevent_delete()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'No se permite eliminar transferencias; registra una transferencia inversa.';
+end;
+$$;
+
+create trigger trg_transferencias_prevent_delete
+before delete on public.transferencias
+for each row
+execute function public.fn_transferencias_prevent_delete();
+
 -- ============================================
 -- 6.5 FABRICACIONES
 -- ============================================
+create sequence if not exists public.fabricaciones_correlativo_seq;
+
 create table if not exists fabricaciones (
   id uuid primary key default gen_random_uuid(),
+  correlativo bigint not null default nextval('public.fabricaciones_correlativo_seq'),
   idbase uuid not null references bases(id),
   idreceta uuid references recetas(id),
   observacion text,
+  estado text not null default 'activo'
+    check (estado in ('activo','cancelado')),
   registrado_at timestamptz default now(),
   editado_at timestamptz,
   registrado_por uuid references auth.users(id),
@@ -7807,6 +8677,52 @@ create table if not exists fabricaciones (
 );
 
 do $$
+declare
+  v_max bigint;
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'fabricaciones'
+      and column_name = 'correlativo'
+  ) then
+    alter table public.fabricaciones
+      add column correlativo bigint;
+  end if;
+  alter table public.fabricaciones
+    alter column correlativo
+      set default nextval('public.fabricaciones_correlativo_seq');
+  with base as (
+    select coalesce(max(correlativo), 0) as offset
+    from public.fabricaciones
+    where correlativo is not null
+  ),
+  ordered as (
+    select id, row_number() over (order by registrado_at, id) as rn
+    from public.fabricaciones
+    where correlativo is null
+  )
+  update public.fabricaciones f
+  set correlativo = base.offset + ordered.rn
+  from ordered, base
+  where f.id = ordered.id;
+  select coalesce(max(correlativo), 0)
+    into v_max
+  from public.fabricaciones;
+  if v_max < 1 then
+    perform setval('public.fabricaciones_correlativo_seq', 1, false);
+  else
+    perform setval('public.fabricaciones_correlativo_seq', v_max, true);
+  end if;
+  alter table public.fabricaciones
+    alter column correlativo set not null;
+end;
+$$;
+
+do $$
+declare
+  v_max bigint;
 begin
   if not exists (
     select 1
@@ -7825,6 +8741,10 @@ $$;
 alter table if exists public.fabricaciones
   add column if not exists contable_version integer not null default 1;
 
+alter table if exists public.fabricaciones
+  add column if not exists estado text not null default 'activo'
+    check (estado in ('activo','cancelado'));
+
 create table if not exists fabricaciones_consumos (
   id uuid primary key default gen_random_uuid(),
   idfabricacion uuid not null references fabricaciones(id) on delete cascade,
@@ -7835,6 +8755,9 @@ create table if not exists fabricaciones_consumos (
   registrado_por uuid references auth.users(id),
   editado_por uuid references auth.users(id)
 );
+
+create index if not exists idx_fabricaciones_consumos_idfabricacion
+  on public.fabricaciones_consumos(idfabricacion);
 
 create table if not exists fabricaciones_resultados (
   id uuid primary key default gen_random_uuid(),
@@ -7849,6 +8772,35 @@ create table if not exists fabricaciones_resultados (
   editado_por uuid references auth.users(id)
 );
 
+create index if not exists idx_fabricaciones_resultados_idfabricacion
+  on public.fabricaciones_resultados(idfabricacion);
+
+create index if not exists idx_fabricaciones_resultados_idfabricacion_producto
+  on public.fabricaciones_resultados(idfabricacion, idproducto);
+
+create or replace function public.fn_fabricaciones_resultados_unique_producto()
+returns trigger
+language plpgsql
+as $$
+begin
+  if exists (
+    select 1
+    from public.fabricaciones_resultados fr
+    where fr.idfabricacion = new.idfabricacion
+      and fr.idproducto = new.idproducto
+      and fr.id <> coalesce(new.id, old.id)
+  ) then
+    raise exception 'El producto ya está registrado en los resultados de esta fabricación.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_fabricaciones_resultados_unique_producto
+before insert or update on public.fabricaciones_resultados
+for each row
+execute function public.fn_fabricaciones_resultados_unique_producto();
+
 create or replace function public.fn_fabricaciones_recalcular_costos(p_idfabricacion uuid)
 returns void
 language plpgsql
@@ -7857,6 +8809,7 @@ declare
   v_total_consumo numeric(18,6) := 0;
   v_total_resultado numeric(18,6) := 0;
 begin
+  perform set_config('erp.skip_costos_historial', '1', true);
   select
       coalesce(
         sum(
@@ -7899,6 +8852,7 @@ begin
           end
     where fr.idfabricacion = p_idfabricacion;
   end if;
+  perform set_config('erp.skip_costos_historial', '0', true);
   perform public.fn_fabricaciones_sync_ajuste(p_idfabricacion);
 end;
 $$;
@@ -8108,6 +9062,62 @@ after insert or update or delete on public.fabricaciones_resultados
 for each row
 execute function public.fn_fabricaciones_touch_costos();
 
+create or replace function public.fn_fabricaciones_block_edit_cancelada()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.estado = 'cancelado' and pg_trigger_depth() = 1 then
+    raise exception 'No se puede modificar una fabricación cancelada.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_fabricaciones_block_edit_cancelada
+before update on public.fabricaciones
+for each row
+execute function public.fn_fabricaciones_block_edit_cancelada();
+
+create or replace function public.fn_fabricaciones_detalle_block_cancelada()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_estado text;
+  v_idfabricacion uuid;
+begin
+  v_idfabricacion := coalesce(new.idfabricacion, old.idfabricacion);
+  if v_idfabricacion is null then
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
+    return new;
+  end if;
+  select f.estado
+    into v_estado
+  from public.fabricaciones f
+  where f.id = v_idfabricacion;
+  if v_estado = 'cancelado' then
+    raise exception 'No se puede modificar el detalle de una fabricación cancelada.';
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_fabricaciones_consumos_block_cancelada
+before insert or update or delete on public.fabricaciones_consumos
+for each row
+execute function public.fn_fabricaciones_detalle_block_cancelada();
+
+create trigger trg_fabricaciones_resultados_block_cancelada
+before insert or update or delete on public.fabricaciones_resultados
+for each row
+execute function public.fn_fabricaciones_detalle_block_cancelada();
+
 create or replace function public.fn_fabricaciones_cleanup_movimientos()
 returns trigger
 language plpgsql
@@ -8140,8 +9150,24 @@ as $$
 declare
   v_base uuid;
   v_accion text;
+  v_costo_unitario numeric(18,6);
+  v_costo_total numeric(18,4);
 begin
-  if tg_op = 'DELETE' then
+  if tg_op = 'UPDATE'
+      and coalesce(current_setting('erp.skip_costos_historial', true), '') = '1' then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' then
+    if new.idproducto is not distinct from old.idproducto
+        and new.cantidad is not distinct from old.cantidad
+        and new.idfabricacion is not distinct from old.idfabricacion
+        and new.costo_unitario is not distinct from old.costo_unitario
+        and new.costo_total is not distinct from old.costo_total then
+      return new;
+    end if;
+  end if;
+
+  if tg_op = 'DELETE' or tg_op = 'UPDATE' then
     select f.idbase
       into v_base
     from public.fabricaciones f
@@ -8152,19 +9178,28 @@ begin
       p_origen_id => old.idfabricacion,
       p_idproducto => old.idproducto,
       p_idbase => v_base,
-      p_cantidad => coalesce(old.cantidad, 0),
+      p_cantidad => -coalesce(old.cantidad, 0),
       p_costo_unitario => coalesce(old.costo_unitario, 0),
-      p_costo_total => coalesce(old.costo_total, 0),
+      p_costo_total => -coalesce(old.costo_total, 0),
       p_registrado_at => coalesce(old.editado_at, old.registrado_at, now()),
-      p_accion => 'delete'
+      p_accion => 'cancelar'
     );
-    return old;
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
   end if;
+
   select f.idbase
     into v_base
   from public.fabricaciones f
   where f.id = new.idfabricacion;
-  v_accion := case when tg_op = 'UPDATE' then 'update' else 'insert' end;
+  select fr.costo_unitario, fr.costo_total
+    into v_costo_unitario, v_costo_total
+  from public.fabricaciones_resultados fr
+  where fr.id = new.id;
+  v_costo_unitario := coalesce(v_costo_unitario, new.costo_unitario, 0);
+  v_costo_total := coalesce(v_costo_total, new.costo_total, 0);
+  v_accion := 'insert';
   perform public.fn_costos_historial_upsert(
     p_origen_tipo => 'fabricacion_resultado',
     p_detalle_id => new.id,
@@ -8172,8 +9207,8 @@ begin
     p_idproducto => new.idproducto,
     p_idbase => v_base,
     p_cantidad => coalesce(new.cantidad, 0),
-    p_costo_unitario => coalesce(new.costo_unitario, 0),
-    p_costo_total => coalesce(new.costo_total, 0),
+    p_costo_unitario => v_costo_unitario,
+    p_costo_total => v_costo_total,
     p_registrado_at => coalesce(new.editado_at, new.registrado_at, now()),
     p_accion => v_accion
   );
@@ -8181,21 +9216,72 @@ begin
 end;
 $$;
 
-create trigger trg_costos_historial_fabricacion_resultado
+drop trigger if exists trg_costos_historial_fabricacion_resultado
+  on public.fabricaciones_resultados;
+create trigger trg_z_costos_historial_fabricacion_resultado
 after insert or update or delete on public.fabricaciones_resultados
 for each row
 execute function public.fn_costos_historial_from_fabricacion_resultado();
 
+create sequence if not exists public.fabricaciones_maquila_correlativo_seq;
+
 create table if not exists fabricaciones_maquila (
   id uuid primary key default gen_random_uuid(),
+  correlativo bigint not null default nextval('public.fabricaciones_maquila_correlativo_seq'),
   idbase uuid not null references bases(id),
   idproveedor uuid references proveedores(id),
   observacion text,
+  estado text not null default 'activo'
+    check (estado in ('activo','cancelado')),
   registrado_at timestamptz default now(),
   editado_at timestamptz,
   registrado_por uuid references auth.users(id),
   editado_por uuid references auth.users(id)
 );
+
+do $$
+declare
+  v_max bigint;
+begin
+  if not exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'fabricaciones_maquila'
+      and column_name = 'correlativo'
+  ) then
+    alter table public.fabricaciones_maquila
+      add column correlativo bigint;
+  end if;
+  alter table public.fabricaciones_maquila
+    alter column correlativo
+      set default nextval('public.fabricaciones_maquila_correlativo_seq');
+  with base as (
+    select coalesce(max(correlativo), 0) as offset
+    from public.fabricaciones_maquila
+    where correlativo is not null
+  ),
+  ordered as (
+    select id, row_number() over (order by registrado_at, id) as rn
+    from public.fabricaciones_maquila
+    where correlativo is null
+  )
+  update public.fabricaciones_maquila f
+  set correlativo = base.offset + ordered.rn
+  from ordered, base
+  where f.id = ordered.id;
+  select coalesce(max(correlativo), 0)
+    into v_max
+  from public.fabricaciones_maquila;
+  if v_max < 1 then
+    perform setval('public.fabricaciones_maquila_correlativo_seq', 1, false);
+  else
+    perform setval('public.fabricaciones_maquila_correlativo_seq', v_max, true);
+  end if;
+  alter table public.fabricaciones_maquila
+    alter column correlativo set not null;
+end;
+$$;
 
 do $$
 begin
@@ -8238,6 +9324,10 @@ $$;
 alter table if exists public.fabricaciones_maquila
   add column if not exists contable_version integer not null default 1;
 
+alter table if exists public.fabricaciones_maquila
+  add column if not exists estado text not null default 'activo'
+    check (estado in ('activo','cancelado'));
+
 create table if not exists fabricaciones_maquila_consumos (
   id uuid primary key default gen_random_uuid(),
   idfabricacion uuid not null references fabricaciones_maquila(id) on delete cascade,
@@ -8248,6 +9338,9 @@ create table if not exists fabricaciones_maquila_consumos (
   registrado_por uuid references auth.users(id),
   editado_por uuid references auth.users(id)
 );
+
+create index if not exists idx_fabricaciones_maquila_consumos_idfabricacion
+  on public.fabricaciones_maquila_consumos(idfabricacion);
 
 create table if not exists fabricaciones_maquila_resultados (
   id uuid primary key default gen_random_uuid(),
@@ -8264,6 +9357,12 @@ create table if not exists fabricaciones_maquila_resultados (
   editado_por uuid references auth.users(id)
 );
 
+create index if not exists idx_fabricaciones_maquila_resultados_idfabricacion
+  on public.fabricaciones_maquila_resultados(idfabricacion);
+
+create index if not exists idx_fabricaciones_maquila_resultados_idfabricacion_producto
+  on public.fabricaciones_maquila_resultados(idfabricacion, idproducto);
+
 create or replace function public.fn_costos_historial_from_fabricacion_maquila_resultado()
 returns trigger
 language plpgsql
@@ -8271,8 +9370,25 @@ as $$
 declare
   v_base uuid;
   v_accion text;
+  v_costo_unitario numeric(18,6);
+  v_costo_total numeric(18,4);
 begin
-  if tg_op = 'DELETE' then
+  if tg_op = 'UPDATE'
+      and coalesce(current_setting('erp.skip_costos_historial', true), '') = '1' then
+    return new;
+  end if;
+  if tg_op = 'UPDATE' then
+    if new.idproducto is not distinct from old.idproducto
+        and new.cantidad is not distinct from old.cantidad
+        and new.tipo_resultado is not distinct from old.tipo_resultado
+        and new.idfabricacion is not distinct from old.idfabricacion
+        and new.costo_unitario is not distinct from old.costo_unitario
+        and new.costo_total is not distinct from old.costo_total then
+      return new;
+    end if;
+  end if;
+
+  if tg_op = 'DELETE' or tg_op = 'UPDATE' then
     select fm.idbase
       into v_base
     from public.fabricaciones_maquila fm
@@ -8283,19 +9399,28 @@ begin
       p_origen_id => old.idfabricacion,
       p_idproducto => old.idproducto,
       p_idbase => v_base,
-      p_cantidad => coalesce(old.cantidad, 0),
+      p_cantidad => -coalesce(old.cantidad, 0),
       p_costo_unitario => coalesce(old.costo_unitario, 0),
-      p_costo_total => coalesce(old.costo_total, 0),
+      p_costo_total => -coalesce(old.costo_total, 0),
       p_registrado_at => coalesce(old.editado_at, old.registrado_at, now()),
-      p_accion => 'delete'
+      p_accion => 'cancelar'
     );
-    return old;
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
   end if;
+
   select fm.idbase
     into v_base
   from public.fabricaciones_maquila fm
   where fm.id = new.idfabricacion;
-  v_accion := case when tg_op = 'UPDATE' then 'update' else 'insert' end;
+  select fr.costo_unitario, fr.costo_total
+    into v_costo_unitario, v_costo_total
+  from public.fabricaciones_maquila_resultados fr
+  where fr.id = new.id;
+  v_costo_unitario := coalesce(v_costo_unitario, new.costo_unitario, 0);
+  v_costo_total := coalesce(v_costo_total, new.costo_total, 0);
+  v_accion := 'insert';
   perform public.fn_costos_historial_upsert(
     p_origen_tipo => 'fabricacion_maquila_resultado',
     p_detalle_id => new.id,
@@ -8303,8 +9428,8 @@ begin
     p_idproducto => new.idproducto,
     p_idbase => v_base,
     p_cantidad => coalesce(new.cantidad, 0),
-    p_costo_unitario => coalesce(new.costo_unitario, 0),
-    p_costo_total => coalesce(new.costo_total, 0),
+    p_costo_unitario => v_costo_unitario,
+    p_costo_total => v_costo_total,
     p_registrado_at => coalesce(new.editado_at, new.registrado_at, now()),
     p_accion => v_accion
   );
@@ -8312,7 +9437,9 @@ begin
 end;
 $$;
 
-create trigger trg_costos_historial_fabricacion_maquila_resultado
+drop trigger if exists trg_costos_historial_fabricacion_maquila_resultado
+  on public.fabricaciones_maquila_resultados;
+create trigger trg_z_costos_historial_fabricacion_maquila_resultado
 after insert or update or delete on public.fabricaciones_maquila_resultados
 for each row
 execute function public.fn_costos_historial_from_fabricacion_maquila_resultado();
@@ -8343,6 +9470,7 @@ declare
   v_total_costos numeric(18,6) := 0;
   v_total_fuente numeric(18,6) := 0;
 begin
+  perform set_config('erp.skip_costos_historial', '1', true);
   select
       coalesce(
         sum(
@@ -8392,6 +9520,7 @@ begin
           end
     where fr.idfabricacion = p_idfabricacion;
   end if;
+  perform set_config('erp.skip_costos_historial', '0', true);
   perform public.fn_fabricaciones_maquila_sync_asientos(p_idfabricacion);
 end;
 $$;
@@ -8706,6 +9835,68 @@ after insert or update or delete on public.fabricaciones_maquila_costos
 for each row
 execute function public.fn_fabricaciones_maquila_touch_costos();
 
+create or replace function public.fn_fabricaciones_maquila_block_edit_cancelada()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.estado = 'cancelado' and pg_trigger_depth() = 1 then
+    raise exception 'No se puede modificar una fabricación maquila cancelada.';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_fabricaciones_maquila_block_edit_cancelada
+before update on public.fabricaciones_maquila
+for each row
+execute function public.fn_fabricaciones_maquila_block_edit_cancelada();
+
+create or replace function public.fn_fabricaciones_maquila_detalle_block_cancelada()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_estado text;
+  v_idfabricacion uuid;
+begin
+  v_idfabricacion := coalesce(new.idfabricacion, old.idfabricacion);
+  if v_idfabricacion is null then
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
+    return new;
+  end if;
+  select f.estado
+    into v_estado
+  from public.fabricaciones_maquila f
+  where f.id = v_idfabricacion;
+  if v_estado = 'cancelado' then
+    raise exception
+      'No se puede modificar el detalle de una fabricación maquila cancelada.';
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger trg_fabricaciones_maquila_consumos_block_cancelada
+before insert or update or delete on public.fabricaciones_maquila_consumos
+for each row
+execute function public.fn_fabricaciones_maquila_detalle_block_cancelada();
+
+create trigger trg_fabricaciones_maquila_resultados_block_cancelada
+before insert or update or delete on public.fabricaciones_maquila_resultados
+for each row
+execute function public.fn_fabricaciones_maquila_detalle_block_cancelada();
+
+create trigger trg_fabricaciones_maquila_costos_block_cancelada
+before insert or update or delete on public.fabricaciones_maquila_costos
+for each row
+execute function public.fn_fabricaciones_maquila_detalle_block_cancelada();
+
 create or replace function public.fn_fabricaciones_maquila_cleanup_movimientos()
 returns trigger
 language plpgsql
@@ -8785,6 +9976,11 @@ select
   f.idreceta,
   rec.nombre as receta_nombre,
   f.observacion,
+  f.estado as estado_codigo,
+  case
+    when f.estado = 'cancelado' then 'Cancelado'
+    else 'Activo'
+  end as estado,
   coalesce(c.consumos_registrados, 0) as consumos_registrados,
   coalesce(c.total_consumido, 0)::numeric(14,4) as total_consumido,
   coalesce(r.productos_registrados, 0) as productos_registrados,
@@ -8863,6 +10059,7 @@ select
   f.idproveedor,
   p.nombre as proveedor_nombre,
   f.observacion,
+  f.estado as estado_codigo,
   coalesce(c.consumos_registrados, 0) as consumos_registrados,
   coalesce(c.total_consumido, 0)::numeric(14,4) as total_consumido,
   coalesce(r.productos_registrados, 0) as productos_registrados,
@@ -8871,6 +10068,7 @@ select
   coalesce(g.costos_registrados, 0) as costos_registrados,
   coalesce(g.total_costos, 0)::numeric(14,2) as total_costos,
   case
+    when f.estado = 'cancelado' then 'Cancelado'
     when coalesce(r.productos_registrados, 0) = 0 then 'Pendiente'
     else 'Completado'
   end as estado,
@@ -8969,7 +10167,7 @@ create or replace function public.fn_inventario_aplicar_evento(
   p_fecha_evento timestamptz,
   p_idproducto uuid,
   p_idbase uuid default null,
-  p_qty numeric,
+  p_qty numeric default null,
   p_costo_unitario numeric default null,
   p_allow_negative boolean default false
 )
@@ -8980,6 +10178,7 @@ set search_path = public
 as $$
 declare
   v_event_id uuid;
+  v_existing public.inventario_eventos_valorizados%rowtype;
   v_saldo public.inventario_saldos%rowtype;
   v_qty numeric(18,6);
   v_unit numeric(18,6);
@@ -8995,6 +10194,35 @@ begin
   v_qty := coalesce(p_qty, 0);
   if v_qty = 0 then
     return null;
+  end if;
+
+  select *
+    into v_existing
+  from public.inventario_eventos_valorizados
+  where origen_tabla = p_origen_tabla
+    and detalle_id = p_detalle_id
+    and evento_tipo = p_evento_tipo
+    and anulado_at is null
+  order by created_at desc
+  limit 1
+  for update;
+
+  if found then
+    if v_existing.idproducto = p_idproducto
+        and v_existing.idbase is not distinct from p_idbase
+        and v_existing.qty = v_qty
+        and (
+          p_costo_unitario is null
+          or v_existing.costo_unitario_aplicado = p_costo_unitario
+        ) then
+      return v_existing.id;
+    end if;
+    perform public.fn_inventario_reversar_evento(
+      p_origen_tabla,
+      p_detalle_id,
+      p_evento_tipo,
+      p_allow_negative
+    );
   end if;
 
   insert into public.inventario_saldos (idproducto)
@@ -9215,6 +10443,7 @@ as $$
 declare
   v_base uuid;
   v_fecha timestamptz;
+  v_costo_unitario numeric(18,6);
 begin
   if tg_op = 'DELETE' then
     perform public.fn_inventario_reversar_evento(
@@ -9248,6 +10477,12 @@ begin
     return new;
   end if;
 
+  select fr.costo_unitario
+    into v_costo_unitario
+  from public.fabricaciones_resultados fr
+  where fr.id = new.id;
+  v_costo_unitario := coalesce(v_costo_unitario, new.costo_unitario, 0);
+
   perform public.fn_inventario_aplicar_evento(
     p_evento_tipo := 'fabricacion_resultado',
     p_origen_tabla := 'fabricaciones',
@@ -9257,7 +10492,7 @@ begin
     p_idproducto := new.idproducto,
     p_idbase := v_base,
     p_qty := new.cantidad,
-    p_costo_unitario := new.costo_unitario,
+    p_costo_unitario := v_costo_unitario,
     p_allow_negative := false
   );
 
@@ -9272,6 +10507,7 @@ as $$
 declare
   v_base uuid;
   v_fecha timestamptz;
+  v_costo_unitario numeric(18,6);
 begin
   if tg_op = 'DELETE' then
     perform public.fn_inventario_reversar_evento(
@@ -9305,6 +10541,12 @@ begin
     return new;
   end if;
 
+  select fr.costo_unitario
+    into v_costo_unitario
+  from public.fabricaciones_maquila_resultados fr
+  where fr.id = new.id;
+  v_costo_unitario := coalesce(v_costo_unitario, new.costo_unitario, 0);
+
   perform public.fn_inventario_aplicar_evento(
     p_evento_tipo := 'fabricacion_maquila_resultado',
     p_origen_tabla := 'fabricaciones_maquila',
@@ -9314,7 +10556,7 @@ begin
     p_idproducto := new.idproducto,
     p_idbase := v_base,
     p_qty := new.cantidad,
-    p_costo_unitario := new.costo_unitario,
+    p_costo_unitario := v_costo_unitario,
     p_allow_negative := false
   );
 
@@ -9388,12 +10630,16 @@ after insert or update or delete on public.compras_movimiento_detalle
 for each row
 execute function public.fn_inventario_evt_compras_mov_detalle();
 
-create trigger trg_inventario_fabricaciones_resultados
+drop trigger if exists trg_inventario_fabricaciones_resultados
+  on public.fabricaciones_resultados;
+create trigger trg_z_inventario_fabricaciones_resultados
 after insert or update or delete on public.fabricaciones_resultados
 for each row
 execute function public.fn_inventario_evt_fabricaciones_resultados();
 
-create trigger trg_inventario_fabricaciones_maquila_resultados
+drop trigger if exists trg_inventario_fabricaciones_maquila_resultados
+  on public.fabricaciones_maquila_resultados;
+create trigger trg_z_inventario_fabricaciones_maquila_resultados
 after insert or update or delete on public.fabricaciones_maquila_resultados
 for each row
 execute function public.fn_inventario_evt_fabricaciones_maquila_resultados();
@@ -9402,6 +10648,146 @@ create trigger trg_inventario_ajustes_detalle
 after insert or update or delete on public.ajustes_detalle
 for each row
 execute function public.fn_inventario_evt_ajustes_detalle();
+
+create or replace function public.fn_fabricaciones_cancelar()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_row record;
+  v_motivo text := 'Fabricación cancelada';
+begin
+  if tg_op <> 'UPDATE' then
+    return new;
+  end if;
+
+  if new.estado = 'cancelado' and old.estado is distinct from new.estado then
+    for v_row in
+      select
+        fr.id,
+        fr.idproducto,
+        fr.cantidad,
+        fr.costo_unitario,
+        fr.costo_total
+      from public.fabricaciones_resultados fr
+      where fr.idfabricacion = new.id
+    loop
+      perform public.fn_inventario_reversar_evento(
+        'fabricaciones',
+        v_row.id,
+        'fabricacion_resultado'
+      );
+      perform public.fn_costos_historial_upsert(
+        p_origen_tipo => 'fabricacion_resultado',
+        p_detalle_id => v_row.id,
+        p_origen_id => new.id,
+        p_idproducto => v_row.idproducto,
+        p_idbase => new.idbase,
+        p_cantidad => -coalesce(v_row.cantidad, 0),
+        p_costo_unitario => coalesce(v_row.costo_unitario, 0),
+        p_costo_total => -coalesce(v_row.costo_total, 0),
+        p_registrado_at => coalesce(new.editado_at, now()),
+        p_accion => 'cancelar'
+      );
+    end loop;
+
+    for v_row in
+      select id
+      from public.gl_journal_entries
+      where source_id = new.id
+        and source_prefix = 'fabricacion_ajuste'
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_row.id, v_motivo);
+    end loop;
+
+    update public.fabricaciones
+      set idasiento_ajuste = null
+    where id = new.id;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_fabricaciones_cancelar
+  on public.fabricaciones;
+create trigger trg_fabricaciones_cancelar
+after update of estado on public.fabricaciones
+for each row
+when (old.estado is distinct from new.estado)
+execute function public.fn_fabricaciones_cancelar();
+
+create or replace function public.fn_fabricaciones_maquila_cancelar()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_row record;
+  v_motivo text := 'Fabricación maquila cancelada';
+begin
+  if tg_op <> 'UPDATE' then
+    return new;
+  end if;
+
+  if new.estado = 'cancelado' and old.estado is distinct from new.estado then
+    for v_row in
+      select
+        fmr.id,
+        fmr.idproducto,
+        fmr.cantidad,
+        fmr.costo_unitario,
+        fmr.costo_total
+      from public.fabricaciones_maquila_resultados fmr
+      where fmr.idfabricacion = new.id
+    loop
+      perform public.fn_inventario_reversar_evento(
+        'fabricaciones_maquila',
+        v_row.id,
+        'fabricacion_maquila_resultado'
+      );
+      perform public.fn_costos_historial_upsert(
+        p_origen_tipo => 'fabricacion_maquila_resultado',
+        p_detalle_id => v_row.id,
+        p_origen_id => new.id,
+        p_idproducto => v_row.idproducto,
+        p_idbase => new.idbase,
+        p_cantidad => -coalesce(v_row.cantidad, 0),
+        p_costo_unitario => coalesce(v_row.costo_unitario, 0),
+        p_costo_total => -coalesce(v_row.costo_total, 0),
+        p_registrado_at => coalesce(new.editado_at, now()),
+        p_accion => 'cancelar'
+      );
+    end loop;
+
+    for v_row in
+      select id
+      from public.gl_journal_entries
+      where source_id = new.id
+        and source_prefix in ('fabricacion_maquila', 'fabricacion_maquila_ajuste')
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_row.id, v_motivo);
+    end loop;
+
+    update public.fabricaciones_maquila
+      set idasiento_inventario = null,
+          idasiento_pasivo = null,
+          idasiento_ajuste = null
+    where id = new.id;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_fabricaciones_maquila_cancelar
+  on public.fabricaciones_maquila;
+create trigger trg_fabricaciones_maquila_cancelar
+after update of estado on public.fabricaciones_maquila
+for each row
+when (old.estado is distinct from new.estado)
+execute function public.fn_fabricaciones_maquila_cancelar();
 
 create or replace function public.fn_rebuild_inventario_saldos_desde_historico(
   p_allow_negative boolean default true
@@ -9444,6 +10830,7 @@ begin
       fr.costo_unitario
     from public.fabricaciones_resultados fr
     join public.fabricaciones f on f.id = fr.idfabricacion
+    where f.estado = 'activo'
     union all
     select
       'fabricacion_maquila_resultado',
@@ -9457,6 +10844,7 @@ begin
       fmr.costo_unitario
     from public.fabricaciones_maquila_resultados fmr
     join public.fabricaciones_maquila fm on fm.id = fmr.idfabricacion
+    where fm.estado = 'activo'
     union all
     select
       'ajuste',
@@ -9621,7 +11009,6 @@ select  p.id as pedido_id,
         coalesce(sum(dp.precioventa), 0)::numeric(12,2) as total_pedido
 from public.pedidos p
 left join public.v_detallepedidos_ajustado dp on dp.idpedido = p.id
-where p.estado = 'activo'
 group by p.id;
 
 -- Total pagado por el cliente
@@ -9632,7 +11019,6 @@ from public.pedidos p
 left join public.pagos pg
   on pg.idpedido = p.id
  and pg.estado = 'activo'
-where p.estado = 'activo'
 group by p.id;
 
 -- Total de cargos por devoluciones (penalidad + monto_ida + monto_vuelta)
@@ -9654,8 +11040,7 @@ from (
   from public.pedidos p
   left join public.viajes_devueltos vd
     on vd.idpedido = p.id
-   and vd.estado <> 'pendiente'
-  where p.estado = 'activo'
+   and vd.estado = 'devuelto_base'
   group by p.id
 ) c;
 
@@ -9671,8 +11056,7 @@ with prov as (
 select  p.id as pedido_id,
         (coalesce(prov.n_movs_prov,0) * 50.00)::numeric(12,2) as total_recargo_provincia
 from public.pedidos p
-left join prov on prov.idpedido = p.id
-where p.estado = 'activo';
+left join prov on prov.idpedido = p.id;
 
 
 -------------------------------------------------------------
@@ -9738,8 +11122,7 @@ from public.pedidos p
 left join public.v_pedidoestadopago_detallepedido     t  on t.pedido_id  = p.id
 left join public.v_pedidosestadopago_cargo            cp on cp.idpedido = p.id
 left join public.v_pedidoestadopago_provincia         rp on rp.pedido_id = p.id
-left join public.v_pedidoestadopago_pagados           pg on pg.pedido_id = p.id
-where p.estado = 'activo';
+left join public.v_pedidoestadopago_pagados           pg on pg.pedido_id = p.id;
 
 -- 7.2 Pedidos · Seguimiento de envíos (unificado)
 -------------------------------------------------
@@ -9824,7 +11207,6 @@ select
   end                                         as estado_entrega
 from estado_producto ep
 join public.pedidos p on p.id = ep.pedido_id
-where p.estado = 'activo'
 group by ep.pedido_id;
 
 
@@ -9935,6 +11317,10 @@ select  p.id                                    as pedido_id,
         ep.estado_pago,
         ee.estado_entrega,
         case
+          when p.estado = 'cancelado'
+            then 'cancelado'
+          when p.estado_admin = 'cancelado_cliente'
+            then 'cancelado'
           when p.estado_admin <> 'activo'
             then p.estado_admin
           when coalesce(rr.cantidad_reembolsos, 0) > 0
@@ -9948,8 +11334,7 @@ select  p.id                                    as pedido_id,
 from public.pedidos p
 left join public.v_pedidoestadopago          ep on ep.pedido_id = p.id
 left join public.v_pedidoestadoentrega       ee on ee.pedido_id = p.id
-left join public.v_pedido_reembolsos_resumen rr on rr.idpedido = p.id
-where p.estado = 'activo';
+left join public.v_pedido_reembolsos_resumen rr on rr.idpedido = p.id;
 
 -- 7.5 Pedidos · Vista general para UI
 -------------------------------------------------
@@ -9998,6 +11383,10 @@ select
   ep.estado_pago,
   ee.estado_entrega,
   case
+    when p.estado = 'cancelado'
+      then 'cancelado'
+    when coalesce(p.estado_admin, 'activo') = 'cancelado_cliente'
+      then 'cancelado'
     when coalesce(p.estado_admin, 'activo') <> 'activo'
       then p.estado_admin
     when coalesce(rr.cantidad_reembolsos, 0) > 0
@@ -10024,8 +11413,7 @@ left join public.perfiles                   pr on pr.user_id = p.registrado_por
 left join public.perfiles                   pe on pe.user_id = p.editado_por
 left join public.v_pedidoestadopago         ep on ep.pedido_id = p.id
 left join public.v_pedidoestadoentrega      ee on ee.pedido_id = p.id
-left join public.v_pedido_reembolsos_resumen rr on rr.idpedido = p.id
-where p.estado = 'activo';
+left join public.v_pedido_reembolsos_resumen rr on rr.idpedido = p.id;
 
 -- 7.6 Movimientos · Resumen enriquecido
 -------------------------------------------------
@@ -10643,6 +12031,7 @@ with movimientos as (
     f.registrado_at as registrado_at
   from public.fabricaciones f
   join public.fabricaciones_consumos fc on fc.idfabricacion = f.id
+  where f.estado = 'activo'
   union all
   select
     fr.idproducto,
@@ -10653,6 +12042,7 @@ with movimientos as (
     f.registrado_at as registrado_at
   from public.fabricaciones f
   join public.fabricaciones_resultados fr on fr.idfabricacion = f.id
+  where f.estado = 'activo'
   union all
   select
     fmc.idproducto,
@@ -10663,6 +12053,7 @@ with movimientos as (
     f.registrado_at as registrado_at
   from public.fabricaciones_maquila f
   join public.fabricaciones_maquila_consumos fmc on fmc.idfabricacion = f.id
+  where f.estado = 'activo'
   union all
   select
     fmr.idproducto,
@@ -10673,6 +12064,7 @@ with movimientos as (
     f.registrado_at as registrado_at
   from public.fabricaciones_maquila f
   join public.fabricaciones_maquila_resultados fmr on fmr.idfabricacion = f.id
+  where f.estado = 'activo'
   union all
   select
     vdd.idproducto,
@@ -11027,9 +12419,14 @@ create table if not exists costo_producto_historial (
   costo_unitario numeric(18,6) not null,
   costo_total numeric(18,4) not null,
   accion text not null default 'insert'
-    check (accion in ('insert','update','delete')),
+    check (accion in ('insert','update','delete','cancelar')),
   registrado_at timestamptz not null default now()
 );
+
+alter table if exists public.costo_producto_historial
+  drop constraint if exists costo_producto_historial_accion_check,
+  add constraint costo_producto_historial_accion_check
+    check (accion in ('insert','update','delete','cancelar'));
 
 create or replace view public.v_costos_historial as
 select
@@ -11043,10 +12440,43 @@ select
   ch.cantidad,
   ch.costo_unitario,
   ch.costo_total,
-  ch.accion,
-  ch.registrado_at
+  case
+    when ch.accion = 'delete' then 'cancelar'
+    when ch.accion = 'update' then 'insert'
+    when ch.origen_tipo = 'compra_movimiento'
+      and cm.es_reversion then 'cancelar'
+    else ch.accion
+  end as accion,
+  ch.registrado_at,
+  case
+    when ch.origen_tipo = 'fabricacion_resultado' then
+      coalesce(nullif(btrim(f.observacion), ''), f.correlativo::text, f.id::text)
+    when ch.origen_tipo = 'fabricacion_maquila_resultado' then
+      coalesce(
+        nullif(btrim(fm.observacion), ''),
+        fm.correlativo::text,
+        fm.id::text
+      )
+    when ch.origen_tipo = 'compra_movimiento' then
+      coalesce(nullif(btrim(c.observacion), ''), c.correlativo::text, c.id::text)
+    else ch.origen_id::text
+  end as origen_referencia
 from public.costo_producto_historial ch
-left join public.productos p on p.id = ch.idproducto;
+left join public.productos p on p.id = ch.idproducto
+left join public.fabricaciones f
+  on f.id = ch.origen_id
+ and ch.origen_tipo = 'fabricacion_resultado'
+left join public.fabricaciones_maquila fm
+  on fm.id = ch.origen_id
+ and ch.origen_tipo = 'fabricacion_maquila_resultado'
+left join public.compras c
+  on c.id = ch.origen_id
+ and ch.origen_tipo = 'compra_movimiento'
+left join public.compras_movimiento_detalle cmd
+  on cmd.id = ch.detalle_id
+ and ch.origen_tipo = 'compra_movimiento'
+left join public.compras_movimientos cm
+  on cm.id = cmd.idmovimiento;
 
 create or replace function public.fn_costos_historial_upsert(
   p_origen_tipo text,
@@ -11068,7 +12498,7 @@ as $$
 declare
   v_accion text := lower(coalesce(p_accion, 'insert'));
 begin
-  if v_accion not in ('insert','update','delete') then
+  if v_accion not in ('insert','update','delete','cancelar') then
     v_accion := 'insert';
   end if;
   insert into public.costo_producto_historial (
@@ -11124,11 +12554,16 @@ select
   c.id as compra_id,
   d.total_detalle,
   p.total_pagado,
-  (coalesce(d.total_detalle,0) - coalesce(p.total_pagado,0))::numeric(14,2) as saldo,
   case
-    when coalesce(p.total_pagado,0) = 0 then 'pendiente'
-    when coalesce(d.total_detalle,0) - coalesce(p.total_pagado,0) = 0 then 'cancelada'
-    when coalesce(d.total_detalle,0) - coalesce(p.total_pagado,0) < 0 then 'pagado_demas'
+    when c.estado = 'cancelado' then 0
+    else (coalesce(d.total_detalle,0) - coalesce(p.total_pagado,0))
+  end::numeric(14,2) as saldo,
+  case
+    when c.estado = 'cancelado' then 'cancelado'
+    when coalesce(d.total_detalle,0) <= 0 then 'pendiente'
+    when coalesce(p.total_pagado,0) <= 0 then 'pendiente'
+    when coalesce(p.total_pagado,0) >= coalesce(d.total_detalle,0)
+      then 'completo'
     else 'parcial'
   end as estado_pago
 from public.compras c
@@ -11239,32 +12674,6 @@ joined as (
     on orig.id = b.source_id
    and b.source_prefix = 'reversal'
 ),
-reversal_evidence as (
-  select
-    rev.id as reversal_id,
-    rev.source_id as original_id,
-    lower(btrim(split_part(rev.descripcion, 'Motivo:', 2))) as motivo,
-    (
-      lower(btrim(split_part(rev.descripcion, 'Motivo:', 2)))
-      ~ '(correccion|reversar|reversad)'
-    ) as explicit_action
-  from public.gl_journal_entries rev
-  where rev.source_prefix = 'reversal'
-),
-reversal_flags as (
-  select
-    entry_id,
-    bool_or(explicit_action) as explicit_action
-  from (
-    select reversal_id as entry_id, explicit_action
-    from reversal_evidence
-    union all
-    select original_id as entry_id, explicit_action
-    from reversal_evidence
-    where original_id is not null
-  ) as mapped_flags
-  group by entry_id
-),
 mapped as (
   select
     j.id,
@@ -11287,6 +12696,7 @@ mapped as (
     j.posted_at,
     j.created_at,
     j.is_reversal,
+    coalesce(cm.es_reversion, false) as recepcion_es_reversion,
     j.debe,
     j.haber
   from joined j
@@ -11312,26 +12722,74 @@ select
     'DD/MM/YYYY HH24:MI:SS'
   ) as fecha_display,
   source_prefix,
-  descripcion,
+  case
+    when source_prefix = 'recepcion_compra'
+      and recepcion_es_reversion
+      then concat('Reversa: ', descripcion)
+    else descripcion
+  end as descripcion,
   debe,
   haber,
   estado,
   case
-    when source_prefix = 'reversal' or estado = 'reversed'
+    when source_prefix = 'reversal'
+      or (
+        source_prefix = 'recepcion_compra'
+        and recepcion_es_reversion
+      )
       then 'Correccion'
     else 'Evento'
   end as tipo,
-  case
-    when source_prefix = 'reversal' or estado = 'reversed'
-      then not coalesce(reversal_flags.explicit_action, false)
-    else false
-  end as alerta,
   is_reversal,
-  (is_reversal or estado = 'reversed') as is_correction,
-  case when is_reversal then 'SI' else 'NO' end as reversa_label
+  (
+    is_reversal or
+    (source_prefix = 'recepcion_compra' and recepcion_es_reversion)
+  ) as is_correction,
+  case
+    when is_reversal
+      or (source_prefix = 'recepcion_compra' and recepcion_es_reversion)
+      then 'SI'
+    else 'NO'
+  end as reversa_label
 from mapped
-left join reversal_flags on reversal_flags.entry_id = mapped.id
 where idcompra is not null;
+
+create or replace view public.v_compras_eventos as
+select
+  e.id,
+  e.idcompra,
+  e.tipo,
+  case
+    when e.tipo = 'compra_cancelada' then 'Compra cancelada'
+    when e.tipo = 'pago_reversado' then 'Pago reversado'
+    when e.tipo = 'movimiento_reversado' then 'Movimiento reversado'
+    else e.tipo
+  end as tipo_label,
+  e.referencia_id,
+  e.registrado_at,
+  timezone('America/Lima', e.registrado_at) as registrado_at_local,
+  to_char(
+    timezone('America/Lima', e.registrado_at),
+    'DD/MM/YYYY HH24:MI:SS'
+  ) as registrado_display,
+  e.registrado_por,
+  case
+    when e.tipo = 'pago_reversado' then
+      concat(
+        'Pago ',
+        coalesce(cb.nombre, ''),
+        ' ',
+        to_char(coalesce(cp.monto, 0)::numeric(14,2), 'FM999999999.00')
+      )
+    when e.tipo = 'movimiento_reversado' then
+      concat('Movimiento ', coalesce(b.nombre, ''))
+    else 'Compra cancelada'
+  end as detalle
+from public.compras_eventos e
+left join public.compras_pagos cp on cp.id = e.referencia_id
+left join public.cuentas_bancarias cb on cb.id = cp.idcuenta
+left join public.compras_movimientos cm on cm.id = e.referencia_id
+left join public.bases b on b.id = cm.idbase;
 
 create or replace view public.v_compras_movimientos_vistageneral as
 select
@@ -11341,7 +12799,9 @@ select
   b.nombre as base_nombre,
   c.idproveedor,
   prov.nombre as proveedor_nombre,
+  c.estado as compra_estado,
   cm.observacion,
+  cm.detalle_cerrado,
   cm.es_reversion,
   cm.idmovimiento_origen,
   cm.reversion_id,
@@ -11405,7 +12865,8 @@ select
   coalesce(env.cantidad_detalle,0)::numeric(14,4) as cantidad_detalle,
   coalesce(env.cantidad_enviada,0)::numeric(14,4) as cantidad_enviada,
   case
-    when coalesce(env.cantidad_detalle,0) = 0 then 'sin_productos'
+    when c.estado = 'cancelado' then 'cancelado'
+    when coalesce(env.cantidad_detalle,0) = 0 then 'pendiente'
     when coalesce(env.cantidad_enviada,0) = 0 then 'pendiente'
     when coalesce(env.cantidad_enviada,0) >= coalesce(env.cantidad_detalle,0) then 'completo'
     else 'parcial'
@@ -11416,6 +12877,7 @@ left join public.v_compras_total_enviada env on env.compra_id = c.id;
 create or replace view public.v_compras_vistageneral as
 select
   c.id,
+  c.correlativo,
   c.idproveedor,
   prov.nombre as proveedor_nombre,
   prov.numero as proveedor_numero,
@@ -11426,6 +12888,17 @@ select
   c.editado_at,
   c.registrado_por,
   c.editado_por,
+  case
+    when c.estado = 'cancelado' then 'cancelado'
+    when coalesce(ep.estado_pago, 'pendiente') = 'completo'
+        and coalesce(ee.estado_entrega, 'pendiente') = 'completo'
+      then 'completo'
+    when coalesce(ep.estado_pago, 'pendiente') = 'pendiente'
+        and coalesce(ee.estado_entrega, 'pendiente') = 'pendiente'
+      then 'pendiente'
+    else 'parcial'
+  end as estado,
+  c.detalle_cerrado,
   ep.total_detalle,
   ep.total_pagado,
   ep.saldo,

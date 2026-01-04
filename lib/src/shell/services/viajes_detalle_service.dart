@@ -108,6 +108,35 @@ class ViajesDetalleService {
     }
   }
 
+  Future<void> revertirDevolucion(List<TableRowData> rows) async {
+    if (rows.isEmpty) return;
+    final detalleDataSource = _sectionDataSourcesResolver()['viajes_detalle'];
+    if (detalleDataSource == null) return;
+    try {
+      for (final row in rows) {
+        final devueltoId = row['id']?.toString();
+        final detalleId = row['idviaje_detalle']?.toString();
+        if (detalleId != null && detalleId.isNotEmpty) {
+          await _moduleRepository.updateRow(detalleDataSource, detalleId, {
+            'devuelto_solicitado_at': null,
+          });
+        }
+        if (devueltoId != null && devueltoId.isNotEmpty) {
+          await _moduleRepository.deleteViajeDevuelto(devueltoId);
+        }
+      }
+      await _refreshSection('viajes_detalle');
+      await _refreshSection('viajes');
+      await _refreshSection('pedidos_tabla');
+      if (_sectionDataSourcesResolver().containsKey('viajes_devueltos')) {
+        await _refreshSection('viajes_devueltos');
+      }
+      _showMessage('Devolucion revertida.');
+    } catch (error) {
+      _showMessage('No se pudo revertir la devolucion: $error');
+    }
+  }
+
   Future<void> revertirLlegada(List<TableRowData> rows) async {
     if (rows.isEmpty) return;
     final dataSource = _sectionDataSourcesResolver()['viajes_detalle'];

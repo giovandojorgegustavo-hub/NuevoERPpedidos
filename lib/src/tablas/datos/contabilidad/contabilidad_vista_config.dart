@@ -110,11 +110,6 @@ const List<DetailFieldOverride> contabilidadBalanceGeneralDetalle = [
 const List<TableColumnConfig> contabilidadHistorialColumnas = [
   TableColumnConfig(key: 'fecha', label: 'Fecha'),
   TableColumnConfig(key: 'tipo', label: 'Tipo'),
-  TableColumnConfig(
-    key: 'alerta',
-    label: 'Alerta',
-    textAlign: TextAlign.center,
-  ),
   TableColumnConfig(key: 'cuenta_contable_codigo', label: 'Codigo'),
   TableColumnConfig(key: 'cuenta_contable_nombre', label: 'Cuenta'),
   TableColumnConfig(key: 'descripcion', label: 'Descripcion'),
@@ -125,7 +120,6 @@ const List<TableColumnConfig> contabilidadHistorialColumnas = [
 const List<DetailFieldOverride> contabilidadHistorialDetalle = [
   DetailFieldOverride(key: 'fecha', label: 'Fecha'),
   DetailFieldOverride(key: 'tipo', label: 'Tipo'),
-  DetailFieldOverride(key: 'alerta', label: 'Alerta'),
   DetailFieldOverride(key: 'cuenta_contable_codigo', label: 'Codigo'),
   DetailFieldOverride(key: 'cuenta_contable_nombre', label: 'Cuenta'),
   DetailFieldOverride(key: 'cuenta_tipo', label: 'Tipo cuenta'),

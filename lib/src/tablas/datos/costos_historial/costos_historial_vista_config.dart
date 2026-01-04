@@ -18,6 +18,7 @@ const SectionDataSource costosHistorialDataSource = SectionDataSource(
 const List<TableColumnConfig> costosHistorialColumnas = [
   TableColumnConfig(key: 'registrado_at', label: 'Fecha'),
   TableColumnConfig(key: 'origen_tipo', label: 'Origen'),
+  TableColumnConfig(key: 'origen_referencia', label: 'Referencia'),
   TableColumnConfig(key: 'accion', label: 'Acción'),
   TableColumnConfig(key: 'producto_nombre', label: 'Producto'),
   TableColumnConfig(key: 'cantidad', label: 'Cantidad'),
@@ -28,6 +29,7 @@ const List<TableColumnConfig> costosHistorialColumnas = [
 const List<DetailFieldOverride> costosHistorialCamposDetalle = [
   DetailFieldOverride(key: 'registrado_at', label: 'Fecha'),
   DetailFieldOverride(key: 'origen_tipo', label: 'Origen'),
+  DetailFieldOverride(key: 'origen_referencia', label: 'Referencia'),
   DetailFieldOverride(key: 'origen_id', label: 'ID de origen'),
   DetailFieldOverride(key: 'detalle_id', label: 'Detalle'),
   DetailFieldOverride(key: 'producto_nombre', label: 'Producto'),

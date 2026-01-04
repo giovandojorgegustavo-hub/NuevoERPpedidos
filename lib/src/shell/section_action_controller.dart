@@ -18,4 +18,6 @@ abstract class SectionActionController {
   Future<void> createRow(String sectionId);
 
   Future<void> createRowInCurrentSection();
+
+  Future<void> cancelRows(String sectionId, List<TableRowData> rows);
 }

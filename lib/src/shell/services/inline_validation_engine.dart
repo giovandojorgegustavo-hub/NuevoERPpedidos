@@ -76,6 +76,37 @@ class InlineValidationEngine {
     return 'Ya agregaste este movimiento en el viaje.';
   }
 
+  String? validateUniqueFabricacionProducto({
+    required String parentSectionId,
+    required InlineSectionConfig inline,
+    required Map<String, dynamic> parentRow,
+    required String productId,
+    String? excludePendingId,
+    dynamic excludeRowId,
+  }) {
+    if (productId.isEmpty) return null;
+    final persistedRows = _persistedInlineRows(
+      parentSectionId: parentSectionId,
+      parentRow: parentRow,
+      inlineId: inline.id,
+    );
+    final pendingRows = _inlineDraftService.findPendingRows(
+      parentSectionId,
+      inline.id,
+    );
+    final duplicated = isInlineValueDuplicated(
+      persistedRows: persistedRows,
+      pendingRows: pendingRows,
+      fieldName: 'idproducto',
+      value: productId,
+      excludePendingId: excludePendingId,
+      excludeRowId: excludeRowId,
+    );
+    if (!duplicated) return null;
+    final friendly = inline.title.toLowerCase();
+    return 'Ya agregaste este producto en $friendly.';
+  }
+
   Future<String?> validateMaquilaConsumoStock({
     required String parentSectionId,
     required InlineSectionConfig inline,

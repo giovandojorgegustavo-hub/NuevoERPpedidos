@@ -191,8 +191,11 @@ class SectionTableActionBuilder {
           'cancelado_cliente',
         ),
       );
+      final filteredBulkActions = baseConfig.bulkActions
+          .where((action) => action.label != 'Eliminar')
+          .toList(growable: false);
       final bulkActions = [
-        ...baseConfig.bulkActions,
+        ...filteredBulkActions,
         anularError,
         cancelarCliente,
       ];
@@ -213,27 +216,15 @@ class SectionTableActionBuilder {
     }
 
     if (section.id == 'viajes_devueltos') {
-      final TableAction clienteResolv = TableAction(
-        label: 'Cliente resolvió',
-        icon: Icons.contact_phone_outlined,
+      final TableAction revertirDevuelto = TableAction(
+        label: 'Revertir devolucion',
+        icon: Icons.undo,
         onSelected: (rows) async {
-          final actionable = rows
-              .where((row) {
-                final estado = row['estado']?.toString() ?? 'pendiente';
-                return estado != 'resuelto_cliente' &&
-                    estado != 'devuelto_base';
-              })
-              .toList(growable: false);
-          if (actionable.isEmpty) {
-            _showMessage('Selecciona devoluciones pendientes.');
+          if (rows.isEmpty) {
+            _showMessage('Selecciona devoluciones a revertir.');
             return;
           }
-          await _viajesDetalleService.actualizarEstadoDevuelto(
-            actionable,
-            estado: 'resuelto_cliente',
-            timestampField: 'cliente_resuelto_at',
-            successMessage: 'Se registró la resolución con el cliente.',
-          );
+          await _viajesDetalleService.revertirDevolucion(rows);
         },
       );
       final TableAction devueltoBase = TableAction(
@@ -263,7 +254,7 @@ class SectionTableActionBuilder {
 
       final bulkActions = [
         ...baseConfig.bulkActions,
-        clienteResolv,
+        revertirDevuelto,
         devueltoBase,
       ];
       return TableViewConfig(

@@ -258,6 +258,16 @@ class ModuleRepository {
     await _client.from(relationName).delete().inFilter(idColumn, ids);
   }
 
+  Future<dynamic> callRpc(
+    String functionName, {
+    Map<String, dynamic>? params,
+  }) async {
+    final response = await _withNetworkRetry(() async {
+      return _client.rpc(functionName, params: params ?? const {});
+    });
+    return response;
+  }
+
   Future<List<ReferenceOption>> fetchReferenceOptions(
     SectionField field, {
     int limit = 200,
@@ -356,7 +366,9 @@ class ModuleRepository {
             'idproducto,cantidad,movimientopedidos!inner(idpedido),'
             'viajes_incidentes_detalle!left(cantidad)',
           )
-          .eq('movimientopedidos.idpedido', pedidoId);
+          .eq('movimientopedidos.idpedido', pedidoId)
+          .eq('movimientopedidos.estado', 'activo')
+          .eq('estado', 'activo');
       return (response as List).cast<Map<String, dynamic>>();
     });
     final adjusted = rows.map((row) {

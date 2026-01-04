@@ -1,6 +1,7 @@
 import 'package:erp_app/src/shell/models.dart';
 import 'package:erp_app/src/shell/section_action_controller.dart';
 import 'package:erp_app/src/shared/table_view/table_view_template.dart';
+import 'package:flutter/material.dart';
 
 import 'detail_field_override.dart';
 import 'package:erp_app/src/tablas/datos/asistencias/asistencias_vista_config.dart';
@@ -126,6 +127,7 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: pedidosCamposDetalle,
     detailSubtitleBuilder: pedidosVistaTablaSubtitleBuilder,
     inlineSections: pedidosInlineSections,
+    bulkActionsBuilder: (_) => const [],
     groupByColumn: 'estado_general',
   ),
 
@@ -372,6 +374,7 @@ final Map<String, SectionOverrides> kSectionOverrides = {
   'stock_admin': SectionOverrides(
     dataSource: stockAdminDataSource,
     tableColumns: stockAdminColumnas,
+    rowTransformer: stockAdminRowTransformer,
     bulkActionsBuilder: (_) => const [],
     rowActionsBuilder: (_) => const [],
     primaryActionBuilder: (_) => null,
@@ -397,18 +400,21 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     dataSource: finanzasMovimientosDataSource,
     tableColumns: finanzasMovimientosColumnas,
     detailFields: finanzasMovimientosDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'finanzas_gastos': SectionOverrides(
     formFields: finanzasGastosFormFields,
     dataSource: finanzasGastosDataSource,
     tableColumns: finanzasGastosColumnas,
     detailFields: finanzasGastosDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'finanzas_cuentas': SectionOverrides(
     formFields: finanzasCuentasFormFields,
     dataSource: finanzasCuentasDataSource,
     tableColumns: finanzasCuentasColumnas,
     detailFields: finanzasCuentasDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'contabilidad_trial_balance': SectionOverrides(
     dataSource: contabilidadBalanceComprobacionDataSource,
@@ -458,6 +464,7 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: transferenciasCamposDetalle,
     rowTransformer: transferenciasRowTransformer,
     inlineSections: transferenciasInlineSections,
+    bulkActionsBuilder: (_) => const [],
   ),
   'transferencias_detalle': SectionOverrides(
     formFields: transferenciasDetalleFormFields,
@@ -480,6 +487,7 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: ajustesCamposDetalle,
     rowTransformer: ajustesRowTransformer,
     inlineSections: ajustesInlineSections,
+    bulkActionsBuilder: (_) => const [],
   ),
   'ajustes_detalle': SectionOverrides(
     formFields: ajustesDetalleFormFields,
@@ -493,16 +501,19 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: comprasCamposDetalle,
     rowTransformer: comprasRowTransformer,
     inlineSections: comprasInlineSections,
+    bulkActionsBuilder: (controller) => _buildCancelActions(controller, 'compras'),
   ),
   'compras_detalle': SectionOverrides(
     formFields: comprasDetalleFormFields,
     dataSource: comprasDetalleDataSource,
     detailFields: comprasDetalleCamposDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'compras_pagos': SectionOverrides(
     formFields: comprasPagosFormFields,
     dataSource: comprasPagosDataSource,
     detailFields: comprasPagosCamposDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'compras_movimientos': SectionOverrides(
     formFields: comprasMovimientosFormFields,
@@ -510,11 +521,13 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     tableColumns: comprasMovimientosColumnas,
     detailFields: comprasMovimientosCamposDetalle,
     inlineSections: const [comprasMovimientosDetalleInlineSection],
+    bulkActionsBuilder: (_) => const [],
   ),
   'compras_movimiento_detalle': SectionOverrides(
     formFields: comprasMovimientosDetalleFormFields,
     dataSource: comprasMovimientosDetalleDataSource,
     detailFields: comprasMovimientosDetalleCamposDetalle,
+    bulkActionsBuilder: (_) => const [],
   ),
   'recetas': SectionOverrides(
     formFields: recetasFormFields,
@@ -539,6 +552,8 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: fabricacionesInternasCamposDetalle,
     rowTransformer: fabricacionesInternasRowTransformer,
     inlineSections: fabricacionesInternasInlineSections,
+    bulkActionsBuilder: (controller) =>
+        _buildCancelActions(controller, 'fabricaciones_internas'),
   ),
   'fabricaciones_internas_consumos': SectionOverrides(
     formFields: fabricacionesInternasConsumosFormFields,
@@ -555,6 +570,8 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     detailFields: fabricacionesMaquilaCamposDetalle,
     rowTransformer: fabricacionesMaquilaRowTransformer,
     inlineSections: fabricacionesMaquilaInlineSections,
+    bulkActionsBuilder: (controller) =>
+        _buildCancelActions(controller, 'fabricaciones_maquila'),
   ),
   'fabricaciones_maquila_consumos': SectionOverrides(
     formFields: fabricacionesMaquilaConsumosFormFields,
@@ -647,3 +664,16 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     inlineSections: const [reportesBasesInlineSection],
   ),
 };
+
+List<TableAction> _buildCancelActions(
+  SectionActionController controller,
+  String sectionId,
+) {
+  return [
+    TableAction(
+      label: 'Cancelar',
+      icon: Icons.cancel_outlined,
+      onSelected: (rows) => controller.cancelRows(sectionId, rows),
+    ),
+  ];
+}

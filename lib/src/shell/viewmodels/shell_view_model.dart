@@ -457,7 +457,6 @@ class ShellViewModel extends ChangeNotifier {
     _pedidosAdminService = PedidosAdminService(
       moduleRepository: _moduleRepository,
       movimientoCoverageService: _movimientoCoverageService,
-      pedidosDataSourceResolver: () => _sectionDataSources['pedidos_tabla'],
       refreshSection: (sectionId) => _controller.onRefreshSection(sectionId),
       showMessage: _showMessage,
       syncSelectedPedidoRow: _syncSelectedPedidoRow,
@@ -1256,6 +1255,18 @@ class ShellViewModel extends ChangeNotifier {
               );
             }
           }
+          if (sectionId == 'compras' || sectionId == 'compras_movimientos') {
+            final detalleCerrado =
+                savedRow['detalle_cerrado']?.toString().toLowerCase().trim() ==
+                    'true';
+            if (!detalleCerrado) {
+              savedRow = await _moduleRepository.updateRow(
+                dataSource,
+                rowId,
+                {'detalle_cerrado': true},
+              );
+            }
+          }
         }
       } else {
         final currentId = _sectionSelectedRows[sectionId]?['id'] ?? data['id'];
@@ -1273,6 +1284,18 @@ class ShellViewModel extends ChangeNotifier {
             parentSectionId: sectionId,
             parentRowId: rowId,
           );
+          if (sectionId == 'compras' || sectionId == 'compras_movimientos') {
+            final detalleCerrado =
+                savedRow['detalle_cerrado']?.toString().toLowerCase().trim() ==
+                    'true';
+            if (!detalleCerrado) {
+              savedRow = await _moduleRepository.updateRow(
+                dataSource,
+                rowId,
+                {'detalle_cerrado': true},
+              );
+            }
+          }
         }
         await _inlineDraftService.loadInlineSectionsForRow(sectionId, savedRow);
       }
@@ -1369,6 +1392,70 @@ class ShellViewModel extends ChangeNotifier {
       );
     } catch (error) {
       _showMessage('No se pudieron eliminar: $error');
+    }
+  }
+
+  Future<void> _handleBulkCancel(
+    String sectionId,
+    List<TableRowData> rows,
+  ) async {
+    if (rows.isEmpty) return;
+    final context = _resolveContext();
+    if (context == null) return;
+    const actionLabel = 'Cancelar';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('$actionLabel registros'),
+        content: Text(
+          rows.length == 1
+              ? '¿$actionLabel el registro seleccionado?'
+              : '¿$actionLabel ${rows.length} registros seleccionados?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Volver'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(actionLabel),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final dataSource = _sectionDataSources[sectionId];
+    if (dataSource == null) return;
+    final nowIso = date_time_utils.currentUtcIsoString();
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    try {
+      var canceledCount = 0;
+      for (final row in rows) {
+        final estadoRaw = row['estado_codigo'] ?? row['estado'];
+        final estado = estadoRaw?.toString().toLowerCase().trim();
+        if (estado == 'cancelado') continue;
+        final id = row['id'];
+        if (id == null) continue;
+        await _moduleRepository.updateRow(dataSource, id, {
+          'estado': 'cancelado',
+          'editado_at': nowIso,
+          if (userId != null) 'editado_por': userId,
+        });
+        canceledCount += 1;
+      }
+      await _controller.onRefreshSection(sectionId);
+      if (canceledCount == 0) {
+        _showMessage('No hay registros para cancelar.');
+      } else {
+        _showMessage(
+          canceledCount == 1
+              ? 'Registro cancelado.'
+              : '$canceledCount registros cancelados.',
+        );
+      }
+    } catch (error) {
+      _showMessage('No se pudieron cancelar: $error');
     }
   }
 
@@ -1490,5 +1577,10 @@ class _ShellSectionActionController implements SectionActionController {
     final sectionId = _viewModel.activeSectionId;
     if (sectionId == null) return;
     await createRow(sectionId);
+  }
+
+  @override
+  Future<void> cancelRows(String sectionId, List<TableRowData> rows) async {
+    await _viewModel._handleBulkCancel(sectionId, rows);
   }
 }

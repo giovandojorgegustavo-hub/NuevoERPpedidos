@@ -18,7 +18,7 @@ const SectionDataSource comprasDataSource = SectionDataSource(
 const List<TableColumnConfig> comprasColumnas = [
   TableColumnConfig(key: 'registrado_at', label: 'Fecha registro'),
   TableColumnConfig(key: 'proveedor_nombre', label: 'Proveedor'),
-  TableColumnConfig(key: 'base_nombre', label: 'Bases vinculadas'),
+  TableColumnConfig(key: 'estado', label: 'Estado'),
   TableColumnConfig(key: 'estado_pago', label: 'Estado de pago'),
   TableColumnConfig(key: 'estado_entrega', label: 'Estado de entrega'),
 ];
@@ -29,6 +29,7 @@ const List<DetailFieldOverride> comprasCamposDetalle = [
   DetailFieldOverride(key: 'proveedor_numero', label: 'Número fiscal'),
   DetailFieldOverride(key: 'observacion', label: 'Observación'),
   DetailFieldOverride(key: 'base_nombre', label: 'Bases asociadas'),
+  DetailFieldOverride(key: 'estado', label: 'Estado'),
   DetailFieldOverride(key: 'total_detalle', label: 'Total calculado'),
   DetailFieldOverride(key: 'total_pagado', label: 'Total pagado'),
   DetailFieldOverride(key: 'saldo', label: 'Saldo'),
@@ -41,6 +42,7 @@ const List<InlineSectionConfig> comprasInlineSections = [
   comprasPagosInlineSection,
   comprasMovimientosInlineSection,
   comprasHistorialContableInlineSection,
+  comprasEventosInlineSection,
 ];
 
 const InlineSectionConfig comprasDetalleInlineSection = InlineSectionConfig(
@@ -82,6 +84,7 @@ const InlineSectionConfig comprasPagosInlineSection = InlineSectionConfig(
     InlineSectionColumn(key: 'cuenta_nombre', label: 'Cuenta'),
     InlineSectionColumn(key: 'monto', label: 'Monto'),
     InlineSectionColumn(key: 'registrado_display', label: 'Fecha'),
+    InlineSectionColumn(key: 'estado', label: 'Estado'),
   ],
   emptyPlaceholder: 'Sin pagos registrados.',
   showInForm: true,
@@ -104,6 +107,7 @@ const InlineSectionConfig comprasMovimientosInlineSection = InlineSectionConfig(
     InlineSectionColumn(key: 'base_nombre', label: 'Base'),
     InlineSectionColumn(key: 'cantidad_total', label: 'Cantidad total'),
     InlineSectionColumn(key: 'productos_registrados', label: 'Productos'),
+    InlineSectionColumn(key: 'es_reversion', label: 'Reversa'),
   ],
   emptyPlaceholder: 'Sin movimientos registrados.',
   showInForm: true,
@@ -140,6 +144,26 @@ const InlineSectionConfig comprasHistorialContableInlineSection =
   enableView: false,
 );
 
+const InlineSectionConfig comprasEventosInlineSection = InlineSectionConfig(
+  id: 'compras_eventos',
+  title: 'Historial de cancelaciones',
+  dataSource: InlineSectionDataSource(
+    schema: 'public',
+    relation: 'v_compras_eventos',
+    orderBy: 'registrado_at',
+    orderAscending: false,
+  ),
+  foreignKeyColumn: 'idcompra',
+  columns: [
+    InlineSectionColumn(key: 'registrado_display', label: 'Fecha'),
+    InlineSectionColumn(key: 'tipo_label', label: 'Tipo'),
+    InlineSectionColumn(key: 'detalle', label: 'Detalle'),
+  ],
+  emptyPlaceholder: 'Sin eventos registrados.',
+  enableCreate: false,
+  enableView: false,
+);
+
 Map<String, dynamic> comprasRowTransformer(Map<String, dynamic> row) {
   final formatted = Map<String, dynamic>.from(row);
   if (row['base_nombre'] == null || row['base_nombre'].toString().isEmpty) {
@@ -154,6 +178,17 @@ Map<String, dynamic> comprasRowTransformer(Map<String, dynamic> row) {
     } else {
       final text = movimientosFlag.toString().toLowerCase().trim();
       formatted['tiene_movimientos'] = text == 'true' || text == '1';
+    }
+  }
+  final detalleCerrado = row['detalle_cerrado'];
+  if (detalleCerrado != null) {
+    if (detalleCerrado is bool) {
+      formatted['detalle_cerrado'] = detalleCerrado;
+    } else if (detalleCerrado is num) {
+      formatted['detalle_cerrado'] = detalleCerrado != 0;
+    } else {
+      final text = detalleCerrado.toString().toLowerCase().trim();
+      formatted['detalle_cerrado'] = text == 'true' || text == '1';
     }
   }
   return formatted;

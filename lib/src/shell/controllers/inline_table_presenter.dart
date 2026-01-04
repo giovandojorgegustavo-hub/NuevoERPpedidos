@@ -80,8 +80,13 @@ class InlineTablePresenter {
               .map((entry) => _fromPendingRow(inline, entry)),
         );
       }
-      final selectionActions =
-          _buildSelectionActions(sectionId, inline, parentRow);
+      final isParentLocked = _isParentLocked(sectionId, parentRow);
+      final isDetalleCerrado = (inline.id == 'compras_detalle' ||
+              inline.id == 'compras_movimiento_detalle') &&
+          _isDetalleCerrado(parentRow, key: 'detalle_cerrado');
+      final selectionActions = isParentLocked
+          ? const <InlineSelectionAction>[]
+          : _buildSelectionActions(sectionId, inline, parentRow);
       final rowTapTargetSectionId = inline.rowTapSectionId ?? inline.formSectionId;
       final Future<void> Function(InlineTableRow row)? onRowTap =
           rowTapTargetSectionId == null
@@ -103,7 +108,7 @@ class InlineTablePresenter {
         enableSelection: selectionActions.isNotEmpty,
         selectionActions: selectionActions,
         onRowTap: onRowTap,
-        primaryAction: inline.enableCreate
+        primaryAction: inline.enableCreate && !isParentLocked && !isDetalleCerrado
             ? InlineTableAction(
                 label: 'Nuevo',
                 onPressed: () => _createHandler(
@@ -189,7 +194,27 @@ class InlineTablePresenter {
   ) {
     final targetSectionId = inline.formSectionId;
     if (targetSectionId == null) return const [];
-    const deleteLabel = 'Eliminar';
+    if (inline.id == 'compras_historial_contable' ||
+        inline.id == 'compras_eventos') {
+      return const [];
+    }
+    if (inline.id == 'compras_detalle' &&
+        _isDetalleCerrado(parentRow, key: 'detalle_cerrado')) {
+      return const [];
+    }
+    if (inline.id == 'compras_movimiento_detalle' &&
+        _isDetalleCerrado(parentRow, key: 'detalle_cerrado')) {
+      return const [];
+    }
+    final deleteLabel = inline.id == 'compras_pagos'
+        ? 'Reversar pago'
+        : inline.id == 'compras_movimientos'
+            ? 'Reversar movimiento'
+            : (inline.id == 'pedidos_detalle' ||
+                    inline.id == 'pedidos_pagos' ||
+                    inline.id == 'pedidos_movimientos')
+                ? 'Cancelar/Revertir'
+                : 'Eliminar';
     return [
       InlineSelectionAction(
         label: deleteLabel,
@@ -207,6 +232,39 @@ class InlineTablePresenter {
         },
       ),
     ];
+  }
+
+  bool _isParentLocked(String sectionId, Map<String, dynamic> row) {
+    if (sectionId == 'compras') {
+      return _isCompraCancelada(row);
+    }
+    if (sectionId == 'compras_movimientos') {
+      final estado = row['compra_estado']?.toString().toLowerCase().trim();
+      return estado == 'cancelado';
+    }
+    if (sectionId != 'fabricaciones_internas' &&
+        sectionId != 'fabricaciones_maquila') {
+      return false;
+    }
+    final estadoRaw = row['estado_codigo'] ?? row['estado'];
+    final estado = estadoRaw?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool _isCompraCancelada(Map<String, dynamic> row) {
+    final estado = row['estado']?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool _isDetalleCerrado(
+    Map<String, dynamic> row, {
+    required String key,
+  }) {
+    final value = row[key];
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final text = value?.toString().toLowerCase().trim() ?? '';
+    return text == 'true' || text == '1';
   }
 }
 

@@ -188,14 +188,38 @@ class InlineNavigationCoordinator {
     }
 
     final tableRows = await rowsLoader();
-    final List<TableAction> bulkActions = [
-      TableAction(
-        label: 'Eliminar',
-        icon: Icons.delete_outline,
-        onSelected: (rows) =>
-            onBulkDelete(parentSectionId, inline, rows, currentRow),
-      ),
-    ];
+    final isParentLocked = _isParentLocked(parentSectionId, currentRow);
+    final isDetalleCerrado = (inline.id == 'compras_detalle' ||
+            inline.id == 'compras_movimiento_detalle') &&
+        _isDetalleCerrado(currentRow);
+    final isPedidosCancelable = inline.id == 'pedidos_detalle' ||
+        inline.id == 'pedidos_pagos' ||
+        inline.id == 'pedidos_movimientos';
+    final bulkLabel = inline.id == 'compras_pagos'
+        ? 'Reversar pago'
+        : inline.id == 'compras_movimientos'
+            ? 'Reversar movimiento'
+            : isPedidosCancelable
+                ? 'Cancelar/Revertir'
+                : 'Eliminar';
+    final bulkIcon = inline.id == 'compras_pagos' ||
+            inline.id == 'compras_movimientos' ||
+            isPedidosCancelable
+        ? Icons.undo
+        : Icons.delete_outline;
+    final isReadOnlyInline = inline.id == 'compras_historial_contable' ||
+        inline.id == 'compras_eventos';
+    final List<TableAction> bulkActions =
+        isParentLocked || isDetalleCerrado || isReadOnlyInline
+            ? const []
+            : [
+                TableAction(
+                  label: bulkLabel,
+                  icon: bulkIcon,
+                  onSelected: (rows) =>
+                      onBulkDelete(parentSectionId, inline, rows, currentRow),
+                ),
+              ];
     if (!_mountedResolver()) return;
     await Navigator.of(_contextProvider()).push(
       MaterialPageRoute(
@@ -205,7 +229,7 @@ class InlineNavigationCoordinator {
           rows: tableRows,
           emptyPlaceholder: inline.emptyPlaceholder,
           loadRows: rowsLoader,
-          onCreate: inline.enableCreate
+          onCreate: inline.enableCreate && !isParentLocked && !isDetalleCerrado
               ? () => onCreate(
                     parentSectionId: parentSectionId,
                     inline: inline,
@@ -242,9 +266,21 @@ class InlineNavigationCoordinator {
     final formSectionId = inline.formSectionId ?? targetSectionId;
     final dataSource = _sectionStateController.sectionDataSources[formSectionId];
     final isPending = row['__pending'] == true;
+    final parentRow = _sectionStateController
+        .sectionSelectedRows[parentSectionId];
+    final isParentLocked = _isParentLocked(
+      parentSectionId,
+      parentRow ?? const {},
+    );
+    final isInlineLocked = _isInlineEditLocked(
+      inline.id,
+      parentRow ?? const {},
+    );
     if (!isPending &&
         dataSource != null &&
-        dataSource.formRelation.isNotEmpty) {
+        dataSource.formRelation.isNotEmpty &&
+        !isParentLocked &&
+        !isInlineLocked) {
       floatingAction = DetailActionConfig(
         label: 'Editar',
         icon: Icons.edit_outlined,
@@ -304,6 +340,16 @@ class InlineNavigationCoordinator {
     required String targetSectionId,
     required Map<String, dynamic> row,
   }) async {
+    final parentRow =
+        _sectionStateController.sectionSelectedRows[parentSectionId];
+    if (_isParentLocked(parentSectionId, parentRow ?? const {})) {
+      _showMessage('No puedes editar un registro cancelado.');
+      return;
+    }
+    if (_isInlineEditLocked(inline.id, parentRow ?? const {})) {
+      _showMessage('No puedes editar este registro.');
+      return;
+    }
     final formBuilder = _formConfigBuilderResolver();
     if (formBuilder == null) return;
     final formSectionId = inline.formSectionId ?? targetSectionId;
@@ -441,7 +487,8 @@ class InlineNavigationCoordinator {
       } else if (inline.id == 'movimientos_detalle' ||
           inline.id == 'pedidos_detalle' ||
           inline.id == 'compras_detalle' ||
-          inline.id == 'compras_movimiento_detalle') {
+          inline.id == 'compras_movimiento_detalle' ||
+          inline.id == 'fabricaciones_internas_resultados') {
         uniqueField = 'idproducto';
       }
       if (uniqueField != null) {
@@ -505,6 +552,48 @@ class InlineNavigationCoordinator {
         _inlineContextCoordinator.clearViajeDetalleContext();
       }
     }
+  }
+
+  bool _isParentLocked(String sectionId, Map<String, dynamic> row) {
+    if (sectionId == 'compras') {
+      return _isCompraCancelada(row);
+    }
+    if (sectionId == 'compras_movimientos') {
+      final estado = row['compra_estado']?.toString().toLowerCase().trim();
+      return estado == 'cancelado';
+    }
+    if (sectionId != 'fabricaciones_internas' &&
+        sectionId != 'fabricaciones_maquila') {
+      return false;
+    }
+    final estadoRaw = row['estado_codigo'] ?? row['estado'];
+    final estado = estadoRaw?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool _isInlineEditLocked(String inlineId, Map<String, dynamic> parentRow) {
+    if (inlineId == 'compras_pagos' ||
+        inlineId == 'compras_movimientos') {
+      return true;
+    }
+    if (inlineId == 'compras_detalle' ||
+        inlineId == 'compras_movimiento_detalle') {
+      return _isDetalleCerrado(parentRow);
+    }
+    return false;
+  }
+
+  bool _isCompraCancelada(Map<String, dynamic> row) {
+    final estado = row['estado']?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool _isDetalleCerrado(Map<String, dynamic> row) {
+    final value = row['detalle_cerrado'];
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final text = value?.toString().toLowerCase().trim() ?? '';
+    return text == 'true' || text == '1';
   }
 
   String _buildInlineDetailSubtitle(

@@ -34,6 +34,7 @@ const List<TableColumnConfig> comprasMovimientosColumnas = [
   TableColumnConfig(key: 'cantidad_total', label: 'Cantidad total'),
   TableColumnConfig(key: 'productos_registrados', label: 'Productos'),
   TableColumnConfig(key: 'costo_total', label: 'Costo total'),
+  TableColumnConfig(key: 'es_reversion', label: 'Reversa'),
 ];
 
 const List<DetailFieldOverride> comprasMovimientosCamposDetalle = [

@@ -60,3 +60,17 @@ const List<TableColumnConfig> stockAdminColumnas = [
     textAlign: TextAlign.right,
   ),
 ];
+
+Map<String, dynamic> stockAdminRowTransformer(Map<String, dynamic> row) {
+  final formatted = Map<String, dynamic>.from(row);
+  formatted['total_valor'] = _formatFixed(formatted['total_valor']);
+  return formatted;
+}
+
+String _formatFixed(dynamic value, {int decimals = 2}) {
+  final numeric = value is num ? value.toDouble() : double.tryParse('$value');
+  if (numeric == null) {
+    return 0.toStringAsFixed(decimals);
+  }
+  return numeric.toStringAsFixed(decimals);
+}

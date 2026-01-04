@@ -484,6 +484,15 @@ class InlineFlowService {
         excludePendingId: excludePendingId,
         excludeRowId: excludeRowId,
       );
+    } else if (inline.id == 'fabricaciones_internas_resultados') {
+      message = _inlineValidationEngine.validateUniqueFabricacionProducto(
+        parentSectionId: parentSectionId,
+        inline: inline,
+        parentRow: parentRow,
+        productId: itemId,
+        excludePendingId: excludePendingId,
+        excludeRowId: excludeRowId,
+      );
     }
     if (message == null) return true;
     _showMessage(message);

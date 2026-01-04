@@ -9,11 +9,6 @@ InlineTableConfig buildComprasHistorialContableInlineView(
 
   final filters = [
     InlineTableFilter(
-      label: 'Mostrar solo alertas',
-      behavior: InlineTableFilterBehavior.include,
-      predicate: (row) => isTrue(row.rawRow?['alerta']),
-    ),
-    InlineTableFilter(
       label: 'Mostrar solo correcciones',
       behavior: InlineTableFilterBehavior.include,
       predicate: (row) => isTrue(row.rawRow?['is_correction']),

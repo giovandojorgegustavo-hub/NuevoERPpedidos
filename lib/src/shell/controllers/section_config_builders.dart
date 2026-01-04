@@ -172,7 +172,11 @@ class DetailConfigBuilder {
     );
     DetailActionConfig? floatingAction;
     final dataSource = _sectionStateController.sectionDataSources[section.id];
-    final canEdit = dataSource != null && dataSource.formRelation.isNotEmpty;
+    final isLocked = _isSectionLocked(section.id, row);
+    final canEdit =
+        dataSource != null &&
+        dataSource.formRelation.isNotEmpty &&
+        !isLocked;
     if (canEdit) {
       floatingAction = DetailActionConfig(
         label: 'Editar',
@@ -243,6 +247,31 @@ class DetailConfigBuilder {
     return subtitleBuilder?.call(row) ??
         row['cliente_nombre']?.toString() ??
         (row.entries.isNotEmpty ? '${row.entries.first.value ?? ''}' : '');
+  }
+
+  bool _isFabricacionCancelada(String sectionId, Map<String, dynamic> row) {
+    if (sectionId != 'fabricaciones_internas' &&
+        sectionId != 'fabricaciones_maquila') {
+      return false;
+    }
+    final estadoRaw = row['estado_codigo'] ?? row['estado'];
+    final estado = estadoRaw?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool _isSectionLocked(String sectionId, Map<String, dynamic> row) {
+    if (_isFabricacionCancelada(sectionId, row)) return true;
+    if (sectionId == 'compras') {
+      final estado = row['estado']?.toString().toLowerCase().trim();
+      return estado == 'cancelado';
+    }
+    if (sectionId == 'compras_pagos' ||
+        sectionId == 'compras_movimientos' ||
+        sectionId == 'compras_detalle' ||
+        sectionId == 'compras_movimiento_detalle') {
+      return true;
+    }
+    return false;
   }
 }
 
@@ -459,6 +488,21 @@ class FormConfigBuilder {
         initialValue = formatted;
       }
     }
+    if (field.widgetType == 'reference' &&
+        initialValue != null &&
+        initialValue.isNotEmpty) {
+      final hasOption =
+          options?.any((option) => option.value == initialValue) ?? false;
+      if (!hasOption) {
+        final fallbackLabel =
+            _resolveReferenceFallbackLabel(field, row) ?? initialValue;
+        final updatedOptions = <FormFieldOption>[
+          if (options != null) ...options,
+          FormFieldOption(value: initialValue, label: fallbackLabel),
+        ];
+        options = updatedOptions;
+      }
+    }
     final helperBuilder = field.widgetType == 'reference'
         ? (String? currentValue) =>
               _referenceHelperResolver(sectionId, field.id, currentValue)
@@ -515,5 +559,36 @@ class FormConfigBuilder {
         .map((value) => value.trim().toLowerCase())
         .where((value) => value.isNotEmpty)
         .toList(growable: false);
+  }
+
+  String? _resolveReferenceFallbackLabel(
+    SectionField field,
+    Map<String, dynamic> row,
+  ) {
+    final labelColumn = field.referenceLabelColumn;
+    final direct = _normalizeReferenceLabel(row[labelColumn]);
+    if (direct != null) return direct;
+    final fieldId = field.id;
+    if (fieldId.startsWith('id') && fieldId.length > 2) {
+      final base = fieldId.substring(2);
+      final candidates = <String>[
+        '${base}_nombre',
+        '${base}_name',
+        '${base}_label',
+        '${base}_descripcion',
+      ];
+      for (final key in candidates) {
+        final candidate = _normalizeReferenceLabel(row[key]);
+        if (candidate != null) return candidate;
+      }
+    }
+    return null;
+  }
+
+  String? _normalizeReferenceLabel(dynamic value) {
+    final raw = value?.toString();
+    if (raw == null) return null;
+    final trimmed = raw.trim();
+    return trimmed.isEmpty ? null : trimmed;
   }
 }

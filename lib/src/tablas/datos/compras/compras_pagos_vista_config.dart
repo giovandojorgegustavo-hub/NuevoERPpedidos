@@ -18,4 +18,5 @@ const List<DetailFieldOverride> comprasPagosCamposDetalle = [
   DetailFieldOverride(key: 'cuenta_nombre', label: 'Cuenta bancaria'),
   DetailFieldOverride(key: 'monto', label: 'Monto'),
   DetailFieldOverride(key: 'registrado_display', label: 'Registrado en'),
+  DetailFieldOverride(key: 'estado', label: 'Estado'),
 ];

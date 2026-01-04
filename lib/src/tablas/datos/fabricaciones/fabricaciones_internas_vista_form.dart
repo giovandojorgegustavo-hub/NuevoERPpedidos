@@ -20,7 +20,7 @@ const List<SectionField> fabricacionesInternasFormFields = [
     required: true,
     widgetType: 'reference',
     referenceSchema: 'public',
-    referenceRelation: 'v_recetas_disponibles_por_base',
+    referenceRelation: 'v_recetas_vistageneral',
     referenceLabelColumn: 'nombre',
     order: 2,
   ),

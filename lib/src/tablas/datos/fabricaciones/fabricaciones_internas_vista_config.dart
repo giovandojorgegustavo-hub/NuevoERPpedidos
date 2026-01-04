@@ -50,6 +50,7 @@ const List<TableColumnConfig> fabricacionesInternasColumnas = [
   TableColumnConfig(key: 'consumos_registrados', label: 'Consumos'),
   TableColumnConfig(key: 'productos_registrados', label: 'Resultados'),
   TableColumnConfig(key: 'total_producido', label: 'Total fabricado'),
+  TableColumnConfig(key: 'estado', label: 'Estado'),
 ];
 
 const List<DetailFieldOverride> fabricacionesInternasCamposDetalle = [
@@ -60,6 +61,7 @@ const List<DetailFieldOverride> fabricacionesInternasCamposDetalle = [
   DetailFieldOverride(key: 'total_consumido', label: 'Total consumido'),
   DetailFieldOverride(key: 'total_producido', label: 'Total fabricado'),
   DetailFieldOverride(key: 'total_valor', label: 'Valor total'),
+  DetailFieldOverride(key: 'estado', label: 'Estado'),
 ];
 
 const InlineSectionConfig fabricacionesInternasConsumosInlineSection =

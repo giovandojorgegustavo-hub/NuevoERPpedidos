@@ -12,20 +12,17 @@ class PedidosAdminService {
   PedidosAdminService({
     required ModuleRepository moduleRepository,
     required MovimientoCoverageService movimientoCoverageService,
-    required SectionDataSource? Function() pedidosDataSourceResolver,
     required Future<void> Function(String sectionId) refreshSection,
     required void Function(String message) showMessage,
     required VoidCallback syncSelectedPedidoRow,
   }) : _moduleRepository = moduleRepository,
        _movimientoCoverageService = movimientoCoverageService,
-       _pedidosDataSourceResolver = pedidosDataSourceResolver,
        _refreshSection = refreshSection,
        _showMessage = showMessage,
        _syncSelectedPedidoRow = syncSelectedPedidoRow;
 
   final ModuleRepository _moduleRepository;
   final MovimientoCoverageService _movimientoCoverageService;
-  final SectionDataSource? Function() _pedidosDataSourceResolver;
   final Future<void> Function(String sectionId) _refreshSection;
   final void Function(String message) _showMessage;
   final VoidCallback _syncSelectedPedidoRow;
@@ -35,38 +32,44 @@ class PedidosAdminService {
     String targetEstado,
   ) async {
     if (rows.isEmpty) return;
-    final dataSource = _pedidosDataSourceResolver();
-    if (dataSource == null) return;
     final actionable = rows
         .where((row) {
-          final current = row['estado_admin']?.toString() ?? 'activo';
-          return current != targetEstado;
+          final estadoGeneral =
+              row['estado_general']?.toString().toLowerCase().trim();
+          return estadoGeneral != 'cancelado';
         })
         .toList(growable: false);
     if (actionable.isEmpty) {
-      _showMessage('Selecciona pedidos con un estado diferente.');
+      _showMessage('Selecciona pedidos que aun no esten cancelados.');
       return;
     }
     final userId = Supabase.instance.client.auth.currentUser?.id;
+    final motivo = targetEstado == 'anulado_error'
+        ? 'Anulado por error'
+        : 'Cancelado por cliente';
     try {
       for (final row in actionable) {
         final id = row['id'];
         if (id == null) continue;
-        final payload = <String, dynamic>{
-          'estado_admin': targetEstado,
-          if (userId != null) 'editado_por': userId,
-        };
-        await _moduleRepository.updateRow(dataSource, id, payload);
+        await _moduleRepository.callRpc(
+          'fn_pedidos_cancelar',
+          params: {
+            'p_idpedido': id,
+            'p_estado_admin': targetEstado,
+            'p_motivo': motivo,
+            if (userId != null) 'p_usuario': userId,
+          },
+        );
         _movimientoCoverageService.invalidateCoverage(id.toString());
       }
       await _refreshSection('pedidos_tabla');
       _syncSelectedPedidoRow();
       final message = targetEstado == 'anulado_error'
-          ? 'Pedido marcado como anulado por error.'
-          : 'Pedido marcado como cancelado por el cliente.';
+          ? 'Pedido anulado por error.'
+          : 'Pedido cancelado por el cliente.';
       _showMessage(message);
     } catch (error) {
-      _showMessage('No se pudo actualizar el estado del pedido: $error');
+      _showMessage('No se pudo cancelar el pedido: $error');
     }
   }
 

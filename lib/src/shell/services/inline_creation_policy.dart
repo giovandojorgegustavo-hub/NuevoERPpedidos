@@ -50,6 +50,9 @@ class InlineCreationPolicy {
     if (parentSectionId != 'compras') return null;
     const gatedInlineIds = {'compras_pagos', 'compras_movimientos'};
     if (!gatedInlineIds.contains(inline.id)) return null;
+    if (compraCancelada(parentRow)) {
+      return 'No puedes registrar ${inline.title.toLowerCase()} en una compra cancelada.';
+    }
     String? proveedorId = parentRow['idproveedor']?.toString();
     proveedorId ??= _formDraftValuesResolver(parentSectionId)?['idproveedor']
         ?.trim();
@@ -95,6 +98,26 @@ class InlineCreationPolicy {
     if (value is num) return value != 0;
     final text = value?.toString().toLowerCase().trim() ?? '';
     return text == 'true';
+  }
+
+  bool compraCancelada(Map<String, dynamic> row) {
+    final estado = row['estado']?.toString().toLowerCase().trim();
+    return estado == 'cancelado';
+  }
+
+  bool compraDetalleCerrado(Map<String, dynamic> row) {
+    return _parseBool(row['detalle_cerrado']);
+  }
+
+  bool movimientoDetalleCerrado(Map<String, dynamic> row) {
+    return _parseBool(row['detalle_cerrado']);
+  }
+
+  bool _parseBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final text = value?.toString().toLowerCase().trim() ?? '';
+    return text == 'true' || text == '1';
   }
 
   bool _hasMaquilaInlineRows(

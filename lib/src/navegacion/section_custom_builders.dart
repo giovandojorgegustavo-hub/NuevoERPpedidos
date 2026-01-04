@@ -11,17 +11,17 @@ final Map<String, SectionTableBuilder> kSectionCustomTableBuilders = {
   'contabilidad_balance_sheet': (context, config) =>
       BalanceGeneralBoard(config: config),
   'contabilidad_historial': (context, config) {
-    bool isAlertValue(dynamic value) {
+    bool isCorreccionValue(dynamic value) {
       final text = value?.toString().toLowerCase();
       if (text == null) return false;
-      return text == 'true' || text == '1' || text == 't';
+      return text == 'correccion';
     }
 
     final quickFilters = [
       TableQuickFilter(
-        label: 'Mostrar solo alertas',
+        label: 'Mostrar solo correcciones',
         behavior: TableQuickFilterBehavior.include,
-        predicate: (row) => isAlertValue(row['alerta']),
+        predicate: (row) => isCorreccionValue(row['tipo']),
       ),
     ];
 

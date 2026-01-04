@@ -184,7 +184,8 @@ class InlinePendingEditCoordinator {
       } else if (inline.id == 'movimientos_detalle' ||
           inline.id == 'pedidos_detalle' ||
           inline.id == 'compras_detalle' ||
-          inline.id == 'compras_movimiento_detalle') {
+          inline.id == 'compras_movimiento_detalle' ||
+          inline.id == 'fabricaciones_internas_resultados') {
         uniqueField = 'idproducto';
       }
       if (uniqueField != null) {
