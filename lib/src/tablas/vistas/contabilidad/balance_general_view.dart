@@ -406,7 +406,7 @@ class _BalanceGeneralBoardState extends State<BalanceGeneralBoard> {
     return grouped;
   }
 
-  /// Inserta una fila sintética en patrimonio cuando el balance no cuadra.
+  /// Inserta una fila sintética en patrimonio para mostrar la utilidad del periodo.
   void _injectSyntheticPatrimonio(Map<String, _BalancePeriodData> grouped) {
     for (final period in grouped.values) {
       final activos = period.totals['activo'] ?? 0;
@@ -421,8 +421,8 @@ class _BalanceGeneralBoardState extends State<BalanceGeneralBoard> {
       );
       accounts.add(
         _BalanceAccount(
-          code: 'AJUSTE',
-          name: 'Ajuste por diferencia',
+          code: 'UTILIDAD',
+          name: 'Utilidad del periodo',
           amount: diferencia,
         ),
       );

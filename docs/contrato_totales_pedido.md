@@ -44,9 +44,9 @@
 
 - `SALDO(pedido)` = `TOTAL_A_COBRAR(pedido) - PAGOS`
 - `ESTADO_PAGO`:
+  - `cancelado` si `pedido.estado_admin != 'activo'` o `pedido.estado != 'activo'`
   - `pendiente` si `PAGOS = 0`
-  - `terminado` si `SALDO = 0`
-  - `pagado_demas` si `SALDO < 0`
+  - `terminado` si `SALDO <= 0`
   - `parcial` en otro caso
 
 ## Objetos impactados (fase SQL)

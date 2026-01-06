@@ -46,7 +46,7 @@ class PedidosAdminService {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     final motivo = targetEstado == 'anulado_error'
         ? 'Anulado por error'
-        : 'Cancelado por cliente';
+        : 'Cancelado';
     try {
       for (final row in actionable) {
         final id = row['id'];
@@ -66,7 +66,7 @@ class PedidosAdminService {
       _syncSelectedPedidoRow();
       final message = targetEstado == 'anulado_error'
           ? 'Pedido anulado por error.'
-          : 'Pedido cancelado por el cliente.';
+          : 'Pedido cancelado.';
       _showMessage(message);
     } catch (error) {
       _showMessage('No se pudo cancelar el pedido: $error');
@@ -77,15 +77,8 @@ class PedidosAdminService {
     if (row == null) return const [];
     return [
       DetailActionConfig(
-        label: 'Anular por error',
-        icon: Icons.report_gmailerrorred_outlined,
-        onPressed: () {
-          unawaited(actualizarEstadoAdminBulk([row], 'anulado_error'));
-        },
-      ),
-      DetailActionConfig(
-        label: 'Cancelar cliente',
-        icon: Icons.person_off_outlined,
+        label: 'Cancelar',
+        icon: Icons.cancel_outlined,
         onPressed: () {
           unawaited(actualizarEstadoAdminBulk([row], 'cancelado_cliente'));
         },

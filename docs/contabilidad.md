@@ -67,9 +67,13 @@ asientos `20.02`, `20.01` y `40.01` mediante `fn_compras_sync_asientos`.
   `total_ingreso_reconocido` (lo que ya pasó a 70.01). Las columnas
   `idasiento_*` quedaron sólo para compatibilidad.
 - `fn_pedidos_sync_asientos` trabaja en dos etapas:
-  1. **Confirmación / cambios de monto**: ajusta `12.01` contra `48.01`. Si el
-     pedido sube, se debita CxC y se acredita `Pedidos por entregar`. Si baja o
-     se anula, inserta los asientos inversos.
+  1. **Confirmación / cambios de monto**: ajusta `12.01` contra `48.01` usando
+     el total base (detalle + cargos por devoluciones). Si el pedido sube, se
+     debita CxC y se acredita `Pedidos por entregar`. Si baja o se anula,
+     inserta los asientos inversos.
+  2. **Recargo provincia**: cuando un movimiento se marca como provincia,
+     `fn_pedidos_movimiento_provincia_sync_asiento` registra un asiento de
+     S/ 50.00 en `12.01` vs. `48.01` (y lo revierte si el movimiento se cancela).
   2. **Entrega**: calcula el monto equivalente entregado (proporcional a las
      cantidades despachadas por producto) únicamente para los movimientos que
      tienen un registro en `viajesdetalles` con `llegada_at` y sin
@@ -100,6 +104,15 @@ asientos `20.02`, `20.01` y `40.01` mediante `fn_compras_sync_asientos`.
     salida de caja.
 - Al eliminar el reembolso, se eliminan ambos movimientos y el historial los
   conserva.
+
+## Gastos operativos
+
+- `gastos_operativos` registra salidas de caja/banco y crea movimientos en
+  tesorería.
+- Además se postea un asiento contable:
+  - Débito en la cuenta de gasto seleccionada (60.xx u otra).
+  - Crédito en la cuenta contable asociada a la cuenta bancaria usada.
+- Al editar el gasto se revierte el asiento anterior y se crea uno nuevo.
 
 ## Incidentes de viaje (robado/dañado)
 

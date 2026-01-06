@@ -2,18 +2,22 @@ import 'package:erp_app/src/shared/table_view/table_view_template.dart';
 import 'package:erp_app/src/shell/models.dart';
 import 'package:erp_app/src/shell/services/pedidos_admin_service.dart';
 import 'package:erp_app/src/shell/services/viajes_detalle_service.dart';
+import 'package:erp_app/src/shell/services/viajes_provincia_service.dart';
 import 'package:flutter/material.dart';
 
 class SectionTableActionBuilder {
   SectionTableActionBuilder({
     required ViajesDetalleService viajesDetalleService,
+    required ViajesProvinciaService viajesProvinciaService,
     required PedidosAdminService pedidosAdminService,
     required void Function(String message) showMessage,
   }) : _viajesDetalleService = viajesDetalleService,
+       _viajesProvinciaService = viajesProvinciaService,
        _pedidosAdminService = pedidosAdminService,
        _showMessage = showMessage;
 
   final ViajesDetalleService _viajesDetalleService;
+  final ViajesProvinciaService _viajesProvinciaService;
   final PedidosAdminService _pedidosAdminService;
   final void Function(String message) _showMessage;
 
@@ -172,19 +176,95 @@ class SectionTableActionBuilder {
       );
     }
 
-    if (section.id == 'pedidos_tabla') {
-      final TableAction anularError = TableAction(
-        label: 'Anular por error',
-        icon: Icons.report_gmailerrorred_outlined,
-        onSelected: (rows) =>
-            _pedidosAdminService.actualizarEstadoAdminBulk(
+    if (section.id == 'viajes_provincia') {
+      final TableAction marcarLlegada = TableAction(
+        label: 'Llegó',
+        icon: Icons.check_circle_outline,
+        onSelected: (rows) async {
+          final filtered = rows
+              .where((row) {
+                final state = _detalleState(row);
+                return state.isEmpty || state == 'en_camino';
+              })
+              .toList(growable: false);
+          if (filtered.isEmpty) {
+            _showMessage('Solo puedes marcar llegada en movimientos en camino.');
+            return;
+          }
+          await _viajesProvinciaService.marcarLlegada(filtered);
+        },
+        isVisible: (rows) => _everyState(
           rows,
-          'anulado_error',
+          (state) => state.isEmpty || state == 'en_camino',
         ),
       );
-      final TableAction cancelarCliente = TableAction(
-        label: 'Cancelar cliente',
-        icon: Icons.person_off_outlined,
+      final TableAction revertirLlegada = TableAction(
+        label: 'No llegó',
+        icon: Icons.restore_outlined,
+        onSelected: (rows) async {
+          final filtered = rows
+              .where((row) => _detalleState(row) == 'llegado')
+              .toList(growable: false);
+          if (filtered.isEmpty) {
+            _showMessage(
+              'Solo puedes revertir llegadas marcadas.',
+            );
+            return;
+          }
+          await _viajesProvinciaService.revertirLlegada(filtered);
+        },
+        isVisible: (rows) => _everyState(rows, (state) => state == 'llegado'),
+      );
+      final TableAction cancelar = TableAction(
+        label: 'Cancelar',
+        icon: Icons.cancel_outlined,
+        onSelected: (rows) async {
+          final filtered = rows
+              .where((row) => _detalleState(row) == 'en_camino')
+              .toList(growable: false);
+          if (filtered.isEmpty) {
+            _showMessage(
+              'Solo puedes cancelar viajes en camino. '
+              'Si ya llegaron, usa "No llegó" primero.',
+            );
+            return;
+          }
+          await _viajesProvinciaService.cancelar(filtered);
+        },
+        isVisible: (rows) =>
+            _everyState(rows, (state) => state == 'en_camino'),
+      );
+
+      final filteredBulkActions = baseConfig.bulkActions
+          .where((action) => action.label != 'Eliminar')
+          .toList(growable: false);
+      final bulkActions = [
+        ...filteredBulkActions,
+        marcarLlegada,
+        revertirLlegada,
+        cancelar,
+      ];
+
+      return TableViewConfig(
+        title: baseConfig.title,
+        description: baseConfig.description,
+        columns: baseConfig.columns,
+        rows: baseConfig.rows,
+        initialSort: baseConfig.initialSort,
+        groupByColumn: baseConfig.groupByColumn,
+        rowActions: baseConfig.rowActions,
+        bulkActions: bulkActions,
+        primaryAction: baseConfig.primaryAction,
+        rowTapAction: baseConfig.rowTapAction,
+        onRefresh: baseConfig.onRefresh,
+        emptyPlaceholder: baseConfig.emptyPlaceholder,
+      );
+    }
+
+    if (section.id == 'pedidos_tabla') {
+      final TableAction cancelarPedido = TableAction(
+        label: 'Cancelar',
+        icon: Icons.cancel_outlined,
         onSelected: (rows) =>
             _pedidosAdminService.actualizarEstadoAdminBulk(
           rows,
@@ -196,8 +276,7 @@ class SectionTableActionBuilder {
           .toList(growable: false);
       final bulkActions = [
         ...filteredBulkActions,
-        anularError,
-        cancelarCliente,
+        cancelarPedido,
       ];
       return TableViewConfig(
         title: baseConfig.title,

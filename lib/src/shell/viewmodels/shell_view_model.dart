@@ -32,6 +32,7 @@ import 'package:erp_app/src/shell/services/inline_draft_service.dart';
 import 'package:erp_app/src/shell/services/inline_flow_service.dart';
 import 'package:erp_app/src/shell/services/module_repository.dart';
 import 'package:erp_app/src/shell/services/viajes_detalle_service.dart';
+import 'package:erp_app/src/shell/services/viajes_provincia_service.dart';
 import 'package:erp_app/src/shell/shell_constants.dart';
 import 'package:erp_app/src/shell/shell_controller.dart';
 
@@ -101,6 +102,7 @@ class ShellViewModel extends ChangeNotifier {
   late final VoidCallback _controllerListener;
   late final InlineFlowService _inlineFlowService;
   late final ViajesDetalleService _viajesDetalleService;
+  late final ViajesProvinciaService _viajesProvinciaService;
   late final PedidosAdminService _pedidosAdminService;
   late final SectionTableActionBuilder _tableActionBuilder;
 
@@ -138,6 +140,45 @@ class ShellViewModel extends ChangeNotifier {
       ReferenceDisplayField(label: 'DNI', metadataKey: 'dni'),
     ],
     'viajes_detalle::idmovimiento': [
+      ReferenceDisplayField(label: 'Cliente', metadataKey: 'cliente_nombre'),
+      ReferenceDisplayField(
+        label: 'Número cliente',
+        metadataKey: 'cliente_numero',
+      ),
+      ReferenceDisplayField(
+        label: 'Dirección',
+        metadataKey: 'direccion_display',
+      ),
+      ReferenceDisplayField(
+        label: 'Número contacto',
+        metadataKey: 'contacto_numero_display',
+      ),
+      ReferenceDisplayField(
+        label: 'Nombre contacto',
+        metadataKey: 'contacto_nombre_display',
+      ),
+      ReferenceDisplayField(
+        label: 'Destino provincia',
+        metadataKey: 'provincia_destino',
+      ),
+      ReferenceDisplayField(
+        label: 'Nombre destinatario',
+        metadataKey: 'provincia_destinatario',
+      ),
+      ReferenceDisplayField(
+        label: 'DNI destinatario',
+        metadataKey: 'provincia_dni',
+      ),
+      ReferenceDisplayField(
+        label: 'Base',
+        metadataKey: 'base_nombre',
+      ),
+      ReferenceDisplayField(
+        label: 'ID base',
+        metadataKey: 'idbase',
+      ),
+    ],
+    'viajes_provincia::idmovimiento': [
       ReferenceDisplayField(label: 'Cliente', metadataKey: 'cliente_nombre'),
       ReferenceDisplayField(
         label: 'Número cliente',
@@ -454,6 +495,12 @@ class ShellViewModel extends ChangeNotifier {
       refreshSection: (sectionId) => _controller.onRefreshSection(sectionId),
       showMessage: _showMessage,
     );
+    _viajesProvinciaService = ViajesProvinciaService(
+      moduleRepository: _moduleRepository,
+      sectionDataSourcesResolver: () => _controller.sectionDataSources,
+      refreshSection: (sectionId) => _controller.onRefreshSection(sectionId),
+      showMessage: _showMessage,
+    );
     _pedidosAdminService = PedidosAdminService(
       moduleRepository: _moduleRepository,
       movimientoCoverageService: _movimientoCoverageService,
@@ -463,6 +510,7 @@ class ShellViewModel extends ChangeNotifier {
     );
     _tableActionBuilder = SectionTableActionBuilder(
       viajesDetalleService: _viajesDetalleService,
+      viajesProvinciaService: _viajesProvinciaService,
       pedidosAdminService: _pedidosAdminService,
       showMessage: _showMessage,
     );
@@ -856,6 +904,13 @@ class ShellViewModel extends ChangeNotifier {
     await _referenceController.loadReferenceOptionsForSection(sectionId);
   }
 
+  Future<void> _forceLoadReferenceOptionsForSection(String sectionId) async {
+    await _referenceController.loadReferenceOptionsForSection(
+      sectionId,
+      forceReload: true,
+    );
+  }
+
   bool _shouldLoadInlineSections(String sectionId, Map<String, dynamic> row) {
     return _controller.shouldLoadInlineSections(sectionId, row);
   }
@@ -905,7 +960,11 @@ class ShellViewModel extends ChangeNotifier {
     final dataSource = _sectionDataSources[sectionId];
     if (dataSource == null || dataSource.formRelation.isEmpty) return;
     if (!_ensureBaseAssignmentForSection(sectionId)) return;
-    await _loadReferenceOptionsForSection(sectionId);
+    if (sectionId == 'viajes_provincia') {
+      await _forceLoadReferenceOptionsForSection(sectionId);
+    } else {
+      await _loadReferenceOptionsForSection(sectionId);
+    }
     if (sectionId == 'viajes_detalle') {
       _setSectionContext('viajes_detalle', null);
       _setReferenceFilter('viajes_detalle', 'idpacking', null);
@@ -1328,6 +1387,9 @@ class ShellViewModel extends ChangeNotifier {
       }
 
       await _controller.onRefreshSection(sectionId);
+      if (sectionId == 'viajes_provincia') {
+        unawaited(_forceLoadReferenceOptionsForSection(sectionId));
+      }
       _setState(() {
         _sectionSelectedRows[sectionId] = savedRow;
         _sectionFormModes[sectionId] = SectionFormMode.edit;

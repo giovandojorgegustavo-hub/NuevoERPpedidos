@@ -50,6 +50,22 @@ const SectionDataSource viajesDetalleDataSource = SectionDataSource(
   listLimit: 120,
 );
 
+const SectionDataSource viajesProvinciaDataSource = SectionDataSource(
+  sectionId: 'viajes_provincia',
+  listSchema: 'public',
+  listRelation: 'v_viaje_provincia_vistageneral',
+  listIsView: true,
+  formSchema: 'public',
+  formRelation: 'viajes_provincia',
+  formIsView: false,
+  detailSchema: null,
+  detailRelation: null,
+  detailIsView: null,
+  listOrderBy: 'registrado_at',
+  listOrderAscending: false,
+  listLimit: 120,
+);
+
 const List<TableColumnConfig> viajesColumnas = [
   TableColumnConfig(key: 'nombre_motorizado', label: 'Motorizado'),
   TableColumnConfig(key: 'num_wsp', label: 'Número WhatsApp'),
@@ -65,6 +81,15 @@ const List<TableColumnConfig> viajesDetalleTablaColumnas = [
   TableColumnConfig(key: 'contacto_display', label: 'Contacto'),
   TableColumnConfig(key: 'estado_detalle', label: 'Estado'),
   TableColumnConfig(key: 'packing_display', label: 'Packing'),
+];
+
+const List<TableColumnConfig> viajesProvinciaTablaColumnas = [
+  TableColumnConfig(key: 'movimiento_codigo', label: 'Movimiento'),
+  TableColumnConfig(key: 'cliente_nombre', label: 'Cliente'),
+  TableColumnConfig(key: 'base_nombre', label: 'Base'),
+  TableColumnConfig(key: 'provincia_destino', label: 'Destino'),
+  TableColumnConfig(key: 'estado_detalle', label: 'Estado'),
+  TableColumnConfig(key: 'llegada_at', label: 'Llegada'),
 ];
 
 const List<DetailFieldOverride> viajesDetalleCamposDetalle = [
@@ -90,6 +115,21 @@ const List<DetailFieldOverride> viajesDetalleCamposDetalle = [
     key: 'incidente_registrado_at',
     label: 'Incidente registrado el',
   ),
+];
+
+const List<DetailFieldOverride> viajesProvinciaCamposDetalle = [
+  DetailFieldOverride(key: 'movimiento_codigo', label: 'Movimiento'),
+  DetailFieldOverride(key: 'pedido_codigo', label: 'Pedido'),
+  DetailFieldOverride(key: 'cliente_nombre', label: 'Cliente'),
+  DetailFieldOverride(key: 'cliente_numero', label: 'Número cliente'),
+  DetailFieldOverride(key: 'base_nombre', label: 'Base'),
+  DetailFieldOverride(key: 'provincia_destino', label: 'Destino'),
+  DetailFieldOverride(key: 'provincia_destinatario', label: 'Destinatario'),
+  DetailFieldOverride(key: 'provincia_dni', label: 'DNI'),
+  DetailFieldOverride(key: 'direccion_display', label: 'Dirección'),
+  DetailFieldOverride(key: 'contacto_display', label: 'Contacto'),
+  DetailFieldOverride(key: 'llegada_at', label: 'Llegada'),
+  DetailFieldOverride(key: 'estado_detalle', label: 'Estado'),
 ];
 
 const List<DetailFieldOverride> viajesCamposDetalle = [

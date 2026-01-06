@@ -122,6 +122,7 @@ insert into security_resource_modules (relation_name, modulo) values
   ('detallemovimientopedidos', 'almacen'),
   ('viajes', 'pedidos'),
   ('viajesdetalles', 'almacen'),
+  ('viajes_provincia', 'almacen'),
   ('incidentes', 'operaciones'),
   ('cuentas_bancarias', 'finanzas'),
   ('pagos', 'finanzas'),
@@ -162,6 +163,7 @@ insert into security_resource_modules (relation_name, modulo) values
   ('v_productos_para_compra', 'operaciones'),
   ('v_productos_vistageneral', 'operaciones'),
   ('v_movimientos_disponibles_viaje', 'operaciones'),
+  ('v_movimientos_disponibles_viaje_provincia', 'operaciones'),
   ('transferencias_gastos', 'operaciones'),
   ('v_stock_por_base', 'administracion'),
   ('v_costos_historial', 'operaciones'),
@@ -177,6 +179,7 @@ insert into security_resource_modules (relation_name, modulo) values
   ('movimientos_financieros', 'finanzas'),
   ('v_movimientos_financieros_vistageneral', 'finanzas'),
   ('v_finanzas_gastos_pedidos', 'finanzas'),
+  ('v_pedidos_referencia_gasto', 'finanzas'),
   ('v_finanzas_movimientos_ingresos_gastos', 'finanzas'),
   ('v_finanzas_ajustes_dinero', 'finanzas'),
   ('v_finanzas_transferencias_dinero', 'finanzas'),
@@ -377,6 +380,14 @@ values
   ('pedidos_tabla', 'pedidos', 'Pedidos', 'Tabla maestra de pedidos.', 'table_chart_outlined', 1),
   ('movimientos', 'pedidos', 'Movimientos', 'Seguimiento de movimientos de pedidos.', 'swap_horiz', 2),
   ('viajes', 'pedidos', 'Viajes', 'Asignación y control de viajes.', 'local_shipping_outlined', 3),
+  (
+    'viajes_provincia',
+    'pedidos',
+    'Viajes provincia',
+    'Seguimiento de movimientos a provincia.',
+    'local_shipping',
+    4
+  ),
   (
     'movimientos_base',
     'base',
@@ -760,6 +771,15 @@ values
   ('pedidos_tabla', 'v_pedido_vistageneral', true, 'pedidos', false, 'v_pedido_vistageneral', true),
   ('movimientos', 'v_movimiento_vistageneral', true, 'movimientopedidos', false, 'v_movimiento_vistageneral', true),
   ('viajes', 'v_viaje_vistageneral', true, 'viajes', false, 'v_viaje_vistageneral', true),
+  (
+    'viajes_provincia',
+    'v_viaje_provincia_vistageneral',
+    true,
+    'viajes_provincia',
+    false,
+    'v_viaje_provincia_vistageneral',
+    true
+  ),
   (
     'movimientos_base',
     'v_movimiento_vistageneral_bases',
@@ -1855,59 +1875,6 @@ from public.pedido_reembolsos pr
 group by pr.idpedido;
 
 
--- Eventos administrativos (anulaciones, cancelaciones)
-create table if not exists pedidos_eventos_admin (
-  id uuid primary key default gen_random_uuid(),
-  idpedido uuid not null references pedidos(id) on delete cascade,
-  estado_previo text not null,
-  estado_nuevo text not null,
-  tipo_evento text not null
-    check (tipo_evento in ('anulado_error','cancelado_cliente')),
-  motivo text,
-  registrado_at timestamptz default now(),
-  registrado_por uuid references auth.users(id)
-);
-
-create or replace function public.fn_pedidos_log_estado_admin()
-returns trigger
-language plpgsql
-as $$
-declare
-  v_motivo text;
-begin
-  -- Permit optional motivo via current_setting('erp.pedido_evento_motivo')
-  v_motivo := nullif(current_setting('erp.pedido_evento_motivo', true), '');
-
-  if old.estado_admin is distinct from new.estado_admin then
-    insert into public.pedidos_eventos_admin (
-      idpedido,
-      estado_previo,
-      estado_nuevo,
-      tipo_evento,
-      motivo,
-      registrado_por
-    )
-    values (
-      new.id,
-      old.estado_admin,
-      new.estado_admin,
-      new.estado_admin,
-      v_motivo,
-      coalesce(new.editado_por, new.registrado_por, auth.uid())
-    );
-  end if;
-
-  return new;
-end;
-$$;
-
-
-create trigger tg_pedidos_log_estado_admin
-after update of estado_admin on public.pedidos
-for each row
-when (old.estado_admin is distinct from new.estado_admin)
-execute function public.fn_pedidos_log_estado_admin();
-
 create or replace function public.fn_pedidos_block_cancel()
 returns trigger
 language plpgsql
@@ -2016,6 +1983,14 @@ begin
     where mp.idpedido = p_idpedido
       and vd.llegada_at is not null
     limit 1
+  )
+  or exists (
+    select 1
+    from public.movimientopedidos mp
+    join public.viajes_provincia vp on vp.idmovimiento = mp.id
+    where mp.idpedido = p_idpedido
+      and vp.llegada_at is not null
+    limit 1
   ) then
     raise exception
       'No puedes cancelar el pedido mientras tenga movimientos con llegada registrada.';
@@ -2025,6 +2000,13 @@ begin
     select 1
     from public.movimientopedidos mp
     join public.viajesdetalles vd on vd.idmovimiento = mp.id
+    where mp.idpedido = p_idpedido
+    limit 1
+  )
+  or exists (
+    select 1
+    from public.movimientopedidos mp
+    join public.viajes_provincia vp on vp.idmovimiento = mp.id
     where mp.idpedido = p_idpedido
     limit 1
   ) then
@@ -2155,6 +2137,9 @@ alter table if exists public.movimientopedidos
   add column if not exists estado text not null default 'activo'
     check (estado in ('activo','cancelado'));
 
+create index if not exists idx_movimientopedidos_pedido_estado_provincia
+  on public.movimientopedidos (idpedido, estado, es_provincia);
+
 do $$
 declare
   v_max bigint;
@@ -2257,6 +2242,10 @@ create table if not exists pedido_rectificaciones (
   editado_por uuid references auth.users(id)
 );
 
+create index if not exists idx_pedido_rectificaciones_activo_pedido_producto
+  on public.pedido_rectificaciones (idpedido, idproducto)
+  where estado in ('pendiente', 'en_proceso', 'completado');
+
 create or replace view public.v_pedido_rectificaciones_vistageneral as
 select
   pr.id,
@@ -2348,6 +2337,9 @@ alter table if exists public.detallemovimientopedidos
   add column if not exists estado text not null default 'activo'
     check (estado in ('activo','cancelado'));
 
+create index if not exists idx_detallemovimientopedidos_movimiento_producto
+  on public.detallemovimientopedidos (idmovimiento, idproducto);
+
 create unique index if not exists detallemovimientopedidos_activo_unq
   on public.detallemovimientopedidos (idmovimiento, idproducto)
   where estado = 'activo';
@@ -2401,6 +2393,95 @@ create table if not exists viajesdetalles (
   unique (idmovimiento)  -- << bloquea reutilizar el movimiento en otro viaje
 );
 
+create table if not exists viajes_provincia (
+  id uuid primary key default gen_random_uuid(),
+  idmovimiento uuid not null references movimientopedidos(id) on delete cascade,
+  registrado_at timestamptz default now(),
+  editado_at timestamptz,
+  registrado_por uuid references auth.users(id),
+  editado_por uuid references auth.users(id),
+  llegada_at timestamptz,
+  unique (idmovimiento)
+);
+
+create or replace function public.fn_viajes_provincia_validate_movimiento()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_es_provincia boolean;
+begin
+  select es_provincia
+    into v_es_provincia
+  from public.movimientopedidos
+  where id = new.idmovimiento;
+
+  if not found then
+    raise exception 'Movimiento inválido.';
+  end if;
+
+  if v_es_provincia is distinct from true then
+    raise exception
+      'Solo puedes asignar movimientos de provincia en viaje provincia.';
+  end if;
+
+  if exists (
+    select 1
+    from public.viajesdetalles vd
+    where vd.idmovimiento = new.idmovimiento
+    limit 1
+  ) then
+    raise exception 'El movimiento ya está asignado a un viaje de Lima.';
+  end if;
+
+  return new;
+end;
+$$;
+
+create trigger trg_viajes_provincia_validate_movimiento
+before insert or update on public.viajes_provincia
+for each row
+execute function public.fn_viajes_provincia_validate_movimiento();
+
+create or replace function public.fn_viajesdetalles_validate_movimiento()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_es_provincia boolean;
+begin
+  select es_provincia
+    into v_es_provincia
+  from public.movimientopedidos
+  where id = new.idmovimiento;
+
+  if not found then
+    raise exception 'Movimiento inválido.';
+  end if;
+
+  if v_es_provincia is distinct from false then
+    raise exception
+      'Solo puedes asignar movimientos de Lima en detalle de viaje.';
+  end if;
+
+  if exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = new.idmovimiento
+    limit 1
+  ) then
+    raise exception 'El movimiento ya está asignado a viaje provincia.';
+  end if;
+
+  return new;
+end;
+$$;
+
+create trigger trg_viajesdetalles_validate_movimiento
+before insert or update on public.viajesdetalles
+for each row
+execute function public.fn_viajesdetalles_validate_movimiento();
+
 create or replace function public.fn_movimientopedidos_block_delete_if_viaje()
 returns trigger
 language plpgsql
@@ -2410,6 +2491,12 @@ begin
     select 1
     from public.viajesdetalles vd
     where vd.idmovimiento = old.id
+    limit 1
+  )
+  or exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = old.id
     limit 1
   ) then
     raise exception
@@ -2445,6 +2532,12 @@ begin
       select 1
       from public.viajesdetalles vd
       where vd.idmovimiento = new.id
+      limit 1
+    )
+    or exists (
+      select 1
+      from public.viajes_provincia vp
+      where vp.idmovimiento = new.id
       limit 1
     ) then
       raise exception
@@ -2496,6 +2589,13 @@ begin
     where vd.idmovimiento = p_movimiento_id
       and vd.llegada_at is not null
     limit 1
+  )
+  or exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = p_movimiento_id
+      and vp.llegada_at is not null
+    limit 1
   ) then
     raise exception
       'No puedes cancelar el movimiento porque ya tiene llegada registrada.';
@@ -2505,6 +2605,12 @@ begin
     select 1
     from public.viajesdetalles vd
     where vd.idmovimiento = p_movimiento_id
+    limit 1
+  )
+  or exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = p_movimiento_id
     limit 1
   ) then
     raise exception
@@ -2554,6 +2660,13 @@ begin
     where vd.idmovimiento = v_movimiento
       and vd.llegada_at is not null
     limit 1
+  )
+  or exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = v_movimiento
+      and vp.llegada_at is not null
+    limit 1
   ) then
     raise exception
       'No puedes modificar detalle de movimiento % porque ya tiene llegada registrada.',
@@ -2599,6 +2712,9 @@ create table if not exists viajes_devueltos (
 create unique index if not exists viajes_devueltos_idviaje_detalle_unq
   on public.viajes_devueltos (idviaje_detalle);
 
+create index if not exists idx_viajes_devueltos_pedido_estado
+  on public.viajes_devueltos (idpedido, estado);
+
 create table if not exists viajes_devueltos_detalle (
   id uuid primary key default gen_random_uuid(),
   iddevuelto uuid not null references viajes_devueltos(id) on delete cascade,
@@ -2612,6 +2728,9 @@ create table if not exists viajes_devueltos_detalle (
   editado_por uuid references auth.users(id),
   unique (iddevuelto, iddetalle_movimiento)
 );
+
+create index if not exists idx_viajes_devueltos_detalle_devuelto
+  on public.viajes_devueltos_detalle (iddevuelto);
 
 create or replace function public.fn_viajes_devueltos_detalle_block_posted()
 returns trigger
@@ -3173,6 +3292,9 @@ alter table if exists public.pagos
   add column if not exists estado text not null default 'activo'
     check (estado in ('activo','cancelado'));
 
+create index if not exists idx_pagos_pedido_estado
+  on public.pagos (idpedido, estado);
+
 create sequence if not exists public.pagos_codigo_seq start 1;
 
 create or replace function public.fn_pagos_set_codigo()
@@ -3447,6 +3569,9 @@ create unique index if not exists idx_gl_journal_entries_source_key
 
 create index if not exists idx_gl_journal_entries_periodo
   on public.gl_journal_entries (periodo_contable, estado);
+
+create index if not exists idx_gl_journal_entries_source
+  on public.gl_journal_entries (source_prefix, source_id, estado);
 
 create table if not exists public.gl_journal_lines (
   id uuid primary key default gen_random_uuid(),
@@ -4260,6 +4385,9 @@ declare
   v_desc text;
   v_obs text;
   v_origen text;
+  v_cuenta_origen uuid;
+  v_cuenta_destino uuid;
+  v_cuenta_base uuid;
 begin
   if p_movimiento_id is null then
     return null;
@@ -4291,6 +4419,23 @@ begin
     v_tipo := 'ingreso';
   else
     v_tipo := 'transferencia';
+  end if;
+
+  if v_orig.tipo = 'transferencia' then
+    v_cuenta_origen := v_orig.idcuenta_destino;
+    v_cuenta_destino := v_orig.idcuenta_origen;
+  else
+    v_cuenta_base := coalesce(v_orig.idcuenta_origen, v_orig.idcuenta_destino);
+    if v_tipo = 'ingreso' then
+      v_cuenta_origen := null;
+      v_cuenta_destino := v_cuenta_base;
+    elsif v_tipo in ('gasto','ajuste') then
+      v_cuenta_origen := v_cuenta_base;
+      v_cuenta_destino := null;
+    else
+      v_cuenta_origen := v_orig.idcuenta_origen;
+      v_cuenta_destino := v_orig.idcuenta_destino;
+    end if;
   end if;
 
   v_desc := concat('Reversa: ', v_orig.descripcion);
@@ -4334,8 +4479,8 @@ begin
     v_desc,
     v_orig.monto,
     v_orig.idpedido,
-    case when v_orig.tipo = 'transferencia' then v_orig.idcuenta_destino else v_orig.idcuenta_origen end,
-    case when v_orig.tipo = 'transferencia' then v_orig.idcuenta_origen else v_orig.idcuenta_destino end,
+    v_cuenta_origen,
+    v_cuenta_destino,
     v_orig.idcuenta_contable,
     v_obs,
     v_reg_at,
@@ -4733,7 +4878,7 @@ execute function public.fn_viajes_incidentes_detalle_sync_asientos();
 
 create table if not exists gastos_operativos (
   id uuid primary key default gen_random_uuid(),
-  idpedido uuid not null references pedidos(id) on delete cascade,
+  idpedido uuid references pedidos(id) on delete set null,
   idcuenta uuid references cuentas_bancarias(id),
   idcuenta_contable_tipo uuid not null references cuentas_contables(id),
   idcuenta_contable uuid references cuentas_contables(id),
@@ -4745,6 +4890,16 @@ create table if not exists gastos_operativos (
   registrado_por uuid references auth.users(id),
   editado_por uuid references auth.users(id)
 );
+
+alter table public.gastos_operativos
+  alter column idpedido drop not null;
+
+alter table public.gastos_operativos
+  drop constraint if exists gastos_operativos_idpedido_fkey;
+
+alter table public.gastos_operativos
+  add constraint gastos_operativos_idpedido_fkey
+  foreign key (idpedido) references public.pedidos(id) on delete set null;
 
 do $$
 declare
@@ -4809,6 +4964,118 @@ before insert or update on public.gastos_operativos
 for each row
 execute function public.fn_gastos_operativos_resolve_tipo();
 
+create or replace function public.fn_gastos_operativos_postear_gl(
+  p_gasto_id uuid
+)
+returns uuid
+language plpgsql
+as $$
+declare
+  v_gasto public.gastos_operativos%rowtype;
+  v_bank_account uuid;
+  v_cuenta_nombre text;
+  v_desc text;
+  v_monto numeric(12,2);
+  v_reg_por uuid;
+  v_source_prefix text := 'gasto_operativo';
+  v_base_key text;
+  v_source_key text;
+  v_version integer;
+  v_max_version integer;
+  v_entry_id uuid;
+begin
+  if p_gasto_id is null then
+    return null;
+  end if;
+
+  select *
+    into v_gasto
+  from public.gastos_operativos
+  where id = p_gasto_id
+  for update;
+
+  if not found then
+    return null;
+  end if;
+
+  if v_gasto.idcuenta is null
+      or v_gasto.idcuenta_contable is null
+      or coalesce(v_gasto.monto, 0) <= 0 then
+    return null;
+  end if;
+
+  select idcuenta_contable
+    into v_bank_account
+  from public.cuentas_bancarias
+  where id = v_gasto.idcuenta;
+
+  if v_bank_account is null then
+    raise exception
+      'La cuenta bancaria seleccionada no tiene una cuenta contable asociada.';
+  end if;
+
+  select nombre
+    into v_cuenta_nombre
+  from public.cuentas_contables
+  where id = v_gasto.idcuenta_contable;
+
+  v_desc := coalesce(v_gasto.descripcion, v_cuenta_nombre, 'Gasto operativo');
+  v_monto := round(v_gasto.monto::numeric, 2);
+  v_reg_por := coalesce(v_gasto.editado_por, v_gasto.registrado_por, auth.uid());
+
+  select coalesce(
+      max(
+        case
+          when source_key ~ ':v[0-9]+$' then (regexp_match(source_key, ':v([0-9]+)$'))[1]::int
+          else 1
+        end
+      ),
+      0
+    )
+    into v_max_version
+  from public.gl_journal_entries
+  where source_id = v_gasto.id
+    and source_prefix = v_source_prefix;
+
+  v_version := case
+    when v_max_version >= 1 then v_max_version + 1
+    else 1
+  end;
+  v_base_key := concat(v_source_prefix, ':', v_gasto.id::text);
+  v_source_key := case
+    when v_version = 1 then v_base_key
+    else concat(v_base_key, ':v', v_version::text)
+  end;
+
+  v_entry_id := public.fn_gl_create_entry(
+    p_source_prefix := v_source_prefix,
+    p_source_id := v_gasto.id,
+    p_source_key := v_source_key,
+    p_descripcion := v_desc,
+    p_lines := jsonb_build_array(
+      jsonb_build_object(
+        'account_id', v_gasto.idcuenta_contable,
+        'debit', v_monto,
+        'credit', 0,
+        'memo', v_desc,
+        'line_source_key', 'gasto'
+      ),
+      jsonb_build_object(
+        'account_id', v_bank_account,
+        'debit', 0,
+        'credit', v_monto,
+        'memo', v_desc,
+        'line_source_key', 'banco'
+      )
+    ),
+    p_created_by := v_reg_por,
+    p_post := true
+  );
+
+  return v_entry_id;
+end;
+$$;
+
 create or replace function public.fn_gastos_operativos_sync_movimiento()
 returns trigger
 language plpgsql
@@ -4821,6 +5088,8 @@ declare
   v_tipo_nombre text;
   v_new_id uuid;
   v_motivo text;
+  v_gl_entry_id uuid;
+  v_old record;
 begin
   if tg_op = 'DELETE' then
     if old.idmovimiento_financiero is not null then
@@ -4831,10 +5100,24 @@ begin
         coalesce(old.editado_por, old.registrado_por, auth.uid())
       );
     end if;
+    for v_old in
+      select id
+      from public.gl_journal_entries
+      where source_id = old.id
+        and source_prefix = 'gasto_operativo'
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(
+        v_old.id,
+        'Gasto operativo eliminado'
+      );
+    end loop;
     return old;
   end if;
 
-  if new.idcuenta is null or new.idcuenta_contable is null then
+  if new.idcuenta is null
+      or new.idcuenta_contable is null
+      or coalesce(new.monto, 0) <= 0 then
     if new.idmovimiento_financiero is not null then
       perform public.fn_movimientos_financieros_reversar(
         new.idmovimiento_financiero,
@@ -4844,6 +5127,18 @@ begin
       );
       new.idmovimiento_financiero := null;
     end if;
+    for v_old in
+      select id
+      from public.gl_journal_entries
+      where source_id = new.id
+        and source_prefix = 'gasto_operativo'
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(
+        v_old.id,
+        'Gasto operativo sin cuenta'
+      );
+    end loop;
     return new;
   end if;
 
@@ -4943,6 +5238,25 @@ begin
     new.idmovimiento_financiero := v_new_id;
   end if;
 
+  if tg_op <> 'INSERT' then
+    for v_old in
+      select id
+      from public.gl_journal_entries
+      where source_id = new.id
+        and source_prefix = 'gasto_operativo'
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_old.id, v_motivo);
+    end loop;
+  end if;
+
+  v_gl_entry_id := public.fn_gastos_operativos_postear_gl(new.id);
+  if v_gl_entry_id is not null and new.idmovimiento_financiero is not null then
+    update public.movimientos_financieros
+      set gl_entry_id = v_gl_entry_id
+    where id = new.idmovimiento_financiero;
+  end if;
+
   return new;
 end;
 $$;
@@ -4974,6 +5288,7 @@ declare
   v_pedido record;
   v_total_detalle numeric(14,2);
   v_total_devoluciones_cargos numeric(14,2);
+  v_total_base numeric(14,2);
   v_total_provincia numeric(14,2);
   v_total numeric(14,2);
   v_movs_prov integer;
@@ -4982,7 +5297,10 @@ declare
   v_desc text;
   v_event_user uuid;
   v_old record;
-  v_amount_total numeric(14,2);
+  v_amount_base numeric(14,2);
+  v_existing_entry_id uuid;
+  v_existing_amount numeric(14,2);
+  v_should_update boolean := false;
   v_source_prefix text;
   v_source_key text;
   v_motivo text;
@@ -5035,12 +5353,13 @@ begin
   where m.idpedido = p_idpedido
     and m.estado = 'activo';
 
+  v_total_base := coalesce(v_total_detalle, 0)
+                + coalesce(v_total_devoluciones_cargos, 0);
   v_total_provincia := coalesce(v_movs_prov, 0) * 50.00;
-  v_total := coalesce(v_total_detalle, 0)
-           + coalesce(v_total_devoluciones_cargos, 0)
-           + coalesce(v_total_provincia, 0);
+  v_total := v_total_base + coalesce(v_total_provincia, 0);
 
   if v_pedido.estado_admin <> 'activo' or v_pedido.estado <> 'activo' then
+    v_total_base := 0;
     v_total := 0;
   end if;
 
@@ -5064,10 +5383,38 @@ begin
       'Configura las cuentas contables 12.01 y 48.01 antes de registrar pedidos.';
   end if;
 
-  v_amount_total := round(v_total, 2);
+  v_amount_base := round(v_total_base, 2);
+
+  select id
+    into v_existing_entry_id
+  from public.gl_journal_entries
+  where source_id = p_idpedido
+    and source_prefix = 'pedido_cxc'
+    and estado = 'posted'
+  order by posted_at desc, created_at desc
+  limit 1;
+
+  if v_existing_entry_id is not null then
+    select coalesce(sum(l.debit - l.credit), 0)::numeric(14,2)
+      into v_existing_amount
+    from public.gl_journal_lines l
+    where l.entry_id = v_existing_entry_id
+      and l.account_id = v_cxc_account;
+  end if;
+
+  if v_existing_entry_id is null then
+    v_should_update := v_amount_base >= 0.01;
+  else
+    if v_amount_base < 0.01 then
+      v_should_update := true;
+    else
+      v_existing_amount := coalesce(v_existing_amount, 0);
+      v_should_update := abs(v_existing_amount - v_amount_base) >= 0.01;
+    end if;
+  end if;
 
   v_version_cxc := coalesce(v_pedido.contable_version, 1);
-  if v_amount_total >= 0.01 then
+  if v_should_update and v_amount_base >= 0.01 then
     select coalesce(
         max(
           case
@@ -5092,20 +5439,22 @@ begin
   end if;
 
   v_source_prefix := 'pedido_cxc';
-  v_source_key := case
-    when v_version_cxc = 1 then concat(v_source_prefix, ':', p_idpedido::text)
-    else concat(v_source_prefix, ':', p_idpedido::text, ':v', v_version_cxc::text)
-  end;
-  for v_old in
-    select id
-    from public.gl_journal_entries
-    where source_id = p_idpedido
-      and source_prefix = v_source_prefix
-      and estado = 'posted'
-  loop
-    perform public.fn_gl_reverse_entry(v_old.id, v_motivo);
-  end loop;
-  if v_amount_total >= 0.01 then
+  if v_should_update and v_existing_entry_id is not null then
+    for v_old in
+      select id
+      from public.gl_journal_entries
+      where source_id = p_idpedido
+        and source_prefix = v_source_prefix
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(v_old.id, v_motivo);
+    end loop;
+  end if;
+  if v_should_update and v_amount_base >= 0.01 then
+    v_source_key := case
+      when v_version_cxc = 1 then concat(v_source_prefix, ':', p_idpedido::text)
+      else concat(v_source_prefix, ':', p_idpedido::text, ':v', v_version_cxc::text)
+    end;
     perform public.fn_gl_create_entry(
       p_source_prefix := v_source_prefix,
       p_source_id := p_idpedido,
@@ -5114,7 +5463,7 @@ begin
       p_lines := jsonb_build_array(
         jsonb_build_object(
           'account_id', v_cxc_account,
-          'debit', v_amount_total,
+          'debit', v_amount_base,
           'credit', 0,
           'memo', v_pedido.observacion,
           'line_source_key', 'cxc'
@@ -5122,7 +5471,7 @@ begin
         jsonb_build_object(
           'account_id', v_deferred_account,
           'debit', 0,
-          'credit', v_amount_total,
+          'credit', v_amount_base,
           'memo', v_pedido.observacion,
           'line_source_key', 'diferido'
         )
@@ -5140,6 +5489,165 @@ begin
 end;
 $$;
 
+create or replace function public.fn_pedidos_movimiento_provincia_sync_asiento()
+returns trigger
+language plpgsql
+as $$
+declare
+  v_should_reverse boolean := false;
+  v_should_create boolean := false;
+  v_cxc_account uuid;
+  v_deferred_account uuid;
+  v_desc text;
+  v_event_user uuid;
+  v_amount numeric(14,2) := 50.00;
+  v_source_prefix text := 'pedido_provincia';
+  v_source_key text;
+  v_version integer;
+  v_max_version integer;
+  v_existing uuid;
+  v_pedido record;
+begin
+  if tg_op = 'DELETE' then
+    v_should_reverse := old.es_provincia and old.estado = 'activo';
+  elsif tg_op = 'INSERT' then
+    v_should_create := new.es_provincia and new.estado = 'activo';
+  else
+    if old.es_provincia and old.estado = 'activo'
+        and (
+          old.es_provincia is distinct from new.es_provincia
+          or old.estado is distinct from new.estado
+          or old.idpedido is distinct from new.idpedido
+        ) then
+      v_should_reverse := true;
+    end if;
+    if new.es_provincia and new.estado = 'activo'
+        and (
+          old.es_provincia is distinct from new.es_provincia
+          or old.estado is distinct from new.estado
+          or old.idpedido is distinct from new.idpedido
+        ) then
+      v_should_create := true;
+    end if;
+  end if;
+
+  if v_should_reverse then
+    for v_existing in
+      select id
+      from public.gl_journal_entries
+      where source_prefix = v_source_prefix
+        and source_id = old.id
+        and estado = 'posted'
+    loop
+      perform public.fn_gl_reverse_entry(
+        v_existing,
+        'Recargo provincia actualizado'
+      );
+    end loop;
+  end if;
+
+  if v_should_create then
+    select p.estado, p.estado_admin, p.observacion
+      into v_pedido
+    from public.pedidos p
+    where p.id = new.idpedido;
+
+    if not found then
+      return case when tg_op = 'DELETE' then old else new end;
+    end if;
+
+    if v_pedido.estado <> 'activo' or v_pedido.estado_admin <> 'activo' then
+      return case when tg_op = 'DELETE' then old else new end;
+    end if;
+
+    select id into v_cxc_account
+    from public.cuentas_contables
+    where codigo = '12.01'
+    limit 1;
+
+    select id into v_deferred_account
+    from public.cuentas_contables
+    where codigo = '48.01'
+    limit 1;
+
+    if v_cxc_account is null
+        or v_deferred_account is null then
+      raise exception
+        'Configura las cuentas contables 12.01 y 48.01 antes de registrar provincias.';
+    end if;
+
+    select id
+      into v_existing
+    from public.gl_journal_entries
+    where source_prefix = v_source_prefix
+      and source_id = new.id
+      and estado = 'posted'
+    limit 1;
+
+    if v_existing is not null then
+      return case when tg_op = 'DELETE' then old else new end;
+    end if;
+
+    v_desc := concat(
+      'Recargo provincia movimiento ',
+      coalesce(new.codigo, new.id::text)
+    );
+    v_event_user := coalesce(new.editado_por, new.registrado_por, auth.uid());
+
+    select coalesce(
+        max(
+          case
+            when source_key ~ ':v[0-9]+$' then (regexp_match(source_key, ':v([0-9]+)$'))[1]::int
+            else 1
+          end
+        ),
+        0
+      )
+      into v_max_version
+    from public.gl_journal_entries
+    where source_prefix = v_source_prefix
+      and source_id = new.id;
+
+    v_version := case
+      when v_max_version >= 1 then v_max_version + 1
+      else 1
+    end;
+
+    v_source_key := case
+      when v_version = 1 then concat(v_source_prefix, ':', new.id::text)
+      else concat(v_source_prefix, ':', new.id::text, ':v', v_version::text)
+    end;
+
+    perform public.fn_gl_create_entry(
+      p_source_prefix := v_source_prefix,
+      p_source_id := new.id,
+      p_source_key := v_source_key,
+      p_descripcion := v_desc,
+      p_lines := jsonb_build_array(
+        jsonb_build_object(
+          'account_id', v_cxc_account,
+          'debit', v_amount,
+          'credit', 0,
+          'memo', coalesce(new.observacion, v_pedido.observacion),
+          'line_source_key', 'cxc'
+        ),
+        jsonb_build_object(
+          'account_id', v_deferred_account,
+          'debit', 0,
+          'credit', v_amount,
+          'memo', coalesce(new.observacion, v_pedido.observacion),
+          'line_source_key', 'diferido'
+        )
+      ),
+      p_created_by := v_event_user,
+      p_post := true
+    );
+  end if;
+
+  return case when tg_op = 'DELETE' then old else new end;
+end;
+$$;
+
 create or replace function public.fn_pedidos_evento_entrega(
   p_movimiento_id uuid,
   p_event_user uuid default null
@@ -5151,6 +5659,7 @@ declare
   v_mov record;
   v_total_ingreso numeric(14,2) := 0;
   v_total_costo numeric(14,2) := 0;
+  v_total_provincia numeric(14,2) := 0;
   v_deferred_account uuid;
   v_ingreso_account uuid;
   v_inventory_account uuid;
@@ -5170,6 +5679,7 @@ begin
     mp.idpedido,
     mp.codigo,
     mp.estado,
+    mp.es_provincia,
     p.estado_admin,
     p.observacion
   into v_mov
@@ -5222,6 +5732,11 @@ begin
   where dmp.idmovimiento = p_movimiento_id
     and dmp.estado = 'activo'
     and mp.estado = 'activo';
+
+  if coalesce(v_mov.es_provincia, false) then
+    v_total_provincia := 50.00;
+    v_total_ingreso := v_total_ingreso + v_total_provincia;
+  end if;
 
   if coalesce(v_total_ingreso, 0) < 0.01 and coalesce(v_total_costo, 0) < 0.01 then
     return null;
@@ -5476,6 +5991,26 @@ end;
 $$;
 
 create or replace function public.fn_viajesdetalles_evento_entrega()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+
+  if new.llegada_at is not null and (tg_op = 'INSERT' or old.llegada_at is distinct from new.llegada_at) then
+    perform public.fn_pedidos_evento_entrega(
+      new.idmovimiento,
+      coalesce(new.editado_por, new.registrado_por)
+    );
+  end if;
+
+  return new;
+end;
+$$;
+
+create or replace function public.fn_viajes_provincia_evento_entrega()
 returns trigger
 language plpgsql
 as $$
@@ -6049,6 +6584,21 @@ when (
 )
 execute function public.fn_pedidos_child_sync_asientos();
 
+create trigger trg_movimientopedidos_provincia_asiento
+after insert or delete on public.movimientopedidos
+for each row
+execute function public.fn_pedidos_movimiento_provincia_sync_asiento();
+
+create trigger trg_movimientopedidos_provincia_asiento_update
+after update on public.movimientopedidos
+for each row
+when (
+  old.idpedido is distinct from new.idpedido or
+  old.estado is distinct from new.estado or
+  old.es_provincia is distinct from new.es_provincia
+)
+execute function public.fn_pedidos_movimiento_provincia_sync_asiento();
+
 create trigger trg_viajes_devueltos_recalc_asientos
 after insert or delete on public.viajes_devueltos
 for each row
@@ -6328,6 +6878,11 @@ create trigger trg_viajesdetalles_sync_asientos
 after insert or update or delete on public.viajesdetalles
 for each row
 execute function public.fn_viajesdetalles_evento_entrega();
+
+create trigger trg_viajes_provincia_sync_asientos
+after insert or update or delete on public.viajes_provincia
+for each row
+execute function public.fn_viajes_provincia_evento_entrega();
 
 create trigger trg_viajes_devueltos_sync_asientos
 after insert or update or delete on public.viajes_devueltos
@@ -11093,6 +11648,7 @@ select  p.id as pedido_id,
         - coalesce(pg.total_pagado,0)
         )::numeric(12,2) as saldo,
         case
+          when p.estado_admin <> 'activo' or p.estado <> 'activo' then 'cancelado'
           when coalesce(pg.total_pagado,0) = 0 then 'pendiente'
           when (
             (
@@ -11104,18 +11660,7 @@ select  p.id as pedido_id,
               end
             )
             - coalesce(pg.total_pagado,0)
-          ) = 0 then 'terminado'
-          when (
-            (
-              case
-                when p.estado_admin <> 'activo' or p.estado <> 'activo' then 0
-                else coalesce(t.total_pedido,0)
-                   + coalesce(cp.total_cargos_cliente,0)
-                   + coalesce(rp.total_recargo_provincia,0)
-              end
-            )
-            - coalesce(pg.total_pagado,0)
-          ) < 0 then 'pagado_demas'
+          ) <= 0 then 'terminado'
           else 'parcial'
         end::text as estado_pago
 from public.pedidos p
@@ -11201,13 +11746,14 @@ select
   sum( (ep.resta = 0)::int )                  as n_terminados,
   sum( (ep.resta = ep.cantidad)::int )        as n_pendientes,
   case
+    when p.estado_admin <> 'activo' or p.estado <> 'activo' then 'cancelado'
     when sum( (ep.resta = 0)::int ) = count(*) then 'terminado'
     when sum( (ep.resta = ep.cantidad)::int ) = count(*) then 'pendiente'
     else 'parcial'
   end                                         as estado_entrega
 from estado_producto ep
 join public.pedidos p on p.id = ep.pedido_id
-group by ep.pedido_id;
+group by ep.pedido_id, p.estado_admin, p.estado;
 
 
 
@@ -11220,34 +11766,59 @@ from public.movimientopedidos m
 where m.idbase is null
   and m.estado = 'activo';
 
--- Movimientos asignados (tienen al menos una fila en viajesdetalles)
+-- Movimientos asignados (tienen al menos una fila en viajesdetalles o viajes_provincia)
 create or replace view public.v_mov_asignados as
-select dv.idmovimiento as id, count(*) as asignaciones
-from public.viajesdetalles dv
-join public.movimientopedidos m on m.id = dv.idmovimiento
+select x.idmovimiento as id, count(*) as asignaciones
+from (
+  select vd.idmovimiento
+  from public.viajesdetalles vd
+  union all
+  select vp.idmovimiento
+  from public.viajes_provincia vp
+) x
+join public.movimientopedidos m on m.id = x.idmovimiento
 where m.estado = 'activo'
-group by dv.idmovimiento;
+group by x.idmovimiento;
 
 -- Movimientos con llegada (al menos una fila con llegada_at)
 create or replace view public.v_mov_llegados as
-select dv.idmovimiento as id, count(*) as llegadas
-from public.viajesdetalles dv
-join public.movimientopedidos m on m.id = dv.idmovimiento
-where dv.llegada_at is not null
-  and m.estado = 'activo'
-group by dv.idmovimiento;
+select x.idmovimiento as id, count(*) as llegadas
+from (
+  select vd.idmovimiento
+  from public.viajesdetalles vd
+  where vd.llegada_at is not null
+  union all
+  select vp.idmovimiento
+  from public.viajes_provincia vp
+  where vp.llegada_at is not null
+) x
+join public.movimientopedidos m on m.id = x.idmovimiento
+where m.estado = 'activo'
+group by x.idmovimiento;
 
 -- Marcas de tiempo útiles (solo asignado/llegada)
 create or replace view public.v_mov_timestamps as
 select
   m.id,
-  (select min(dv.registrado_at)
-     from public.viajesdetalles dv
-     where dv.idmovimiento = m.id) as asignado_at,
-  (select min(dv.llegada_at)
-     from public.viajesdetalles dv
-     where dv.idmovimiento = m.id
-       and dv.llegada_at is not null) as llegada_at
+  (select min(src.registrado_at)
+     from (
+       select vd.registrado_at, vd.idmovimiento
+       from public.viajesdetalles vd
+       union all
+       select vp.registrado_at, vp.idmovimiento
+       from public.viajes_provincia vp
+     ) src
+     where src.idmovimiento = m.id) as asignado_at,
+  (select min(src.llegada_at)
+     from (
+       select vd.llegada_at, vd.idmovimiento
+       from public.viajesdetalles vd
+       union all
+       select vp.llegada_at, vp.idmovimiento
+       from public.viajes_provincia vp
+     ) src
+     where src.idmovimiento = m.id
+       and src.llegada_at is not null) as llegada_at
 from public.movimientopedidos m
 where m.estado = 'activo';
 
@@ -11317,19 +11888,15 @@ select  p.id                                    as pedido_id,
         ep.estado_pago,
         ee.estado_entrega,
         case
-          when p.estado = 'cancelado'
+          when p.estado <> 'activo' or p.estado_admin <> 'activo'
             then 'cancelado'
-          when p.estado_admin = 'cancelado_cliente'
-            then 'cancelado'
-          when p.estado_admin <> 'activo'
-            then p.estado_admin
           when coalesce(rr.cantidad_reembolsos, 0) > 0
             then 'devuelto_dinero'
           when ep.estado_pago = 'terminado' and ee.estado_entrega = 'terminado'
             then 'terminado'
           when ep.estado_pago = 'pendiente' or ee.estado_entrega = 'pendiente'
             then 'pendiente'
-        else 'parcial'
+          else 'parcial'
         end as estado_general
 from public.pedidos p
 left join public.v_pedidoestadopago          ep on ep.pedido_id = p.id
@@ -11383,12 +11950,8 @@ select
   ep.estado_pago,
   ee.estado_entrega,
   case
-    when p.estado = 'cancelado'
+    when p.estado <> 'activo' or coalesce(p.estado_admin, 'activo') <> 'activo'
       then 'cancelado'
-    when coalesce(p.estado_admin, 'activo') = 'cancelado_cliente'
-      then 'cancelado'
-    when coalesce(p.estado_admin, 'activo') <> 'activo'
-      then p.estado_admin
     when coalesce(rr.cantidad_reembolsos, 0) > 0
       then 'devuelto_dinero'
     when coalesce(ep.estado_pago, '') = 'terminado'
@@ -11584,10 +12147,23 @@ select
   vm.*
 from public.v_movimiento_vistageneral vm
 where vm.estado_texto = 'asignado'
+  and vm.es_provincia = false
   and not exists (
     select 1
     from public.viajesdetalles vd
     where vd.idmovimiento = vm.id
+  );
+
+create or replace view public.v_movimientos_disponibles_viaje_provincia as
+select
+  vm.*
+from public.v_movimiento_vistageneral vm
+where vm.estado_texto = 'asignado'
+  and vm.es_provincia = true
+  and not exists (
+    select 1
+    from public.viajes_provincia vp
+    where vp.idmovimiento = vm.id
   );
 
 -- 7.8 Viajes · Vista general
@@ -11777,6 +12353,58 @@ left join public.direccion            d   on d.id = m.destino_lima_iddireccion
 left join public.numrecibe            nr  on nr.id = m.destino_lima_idnumrecibe
 left join public.direccion_provincia  dp  on dp.id = m.destino_provincia_iddireccion
 left join public.base_packings        bp  on bp.id = vd.idpacking;
+
+create or replace view public.v_viaje_provincia_vistageneral as
+select
+  vp.id,
+  vp.idmovimiento,
+  m.codigo                               as movimiento_codigo,
+  m.idpedido,
+  p.codigo                               as pedido_codigo,
+  m.es_provincia,
+  vp.registrado_at,
+  vp.editado_at,
+  vp.registrado_por,
+  vp.editado_por,
+  vp.llegada_at,
+  case
+    when vp.llegada_at is not null then 'llegado'
+    else 'en_camino'
+  end                                   as estado_detalle_key,
+  case
+    when vp.llegada_at is not null then 'Llegado'
+    else 'En camino'
+  end                                   as estado_detalle,
+  case
+    when vp.llegada_at is not null then 2
+    else 1
+  end                                   as estado_detalle_codigo,
+  m.idbase                              as base_id,
+  b.nombre                              as base_nombre,
+  c.nombre                              as cliente_nombre,
+  c.numero                              as cliente_numero,
+  dp.lugar_llegada                      as provincia_destino,
+  dp.nombre_completo                    as provincia_destinatario,
+  dp.dni                                as provincia_dni,
+  concat_ws(
+    ' / ',
+    nullif(dp.lugar_llegada, ''),
+    nullif(dp.nombre_completo, ''),
+    nullif(dp.dni, '')
+  )                                     as direccion_display,
+  concat_ws(
+    ' / ',
+    nullif(dp.nombre_completo, ''),
+    nullif(dp.dni, '')
+  )                                     as contacto_display
+from public.viajes_provincia vp
+join public.movimientopedidos m on m.id = vp.idmovimiento
+left join public.pedidos p on p.id = m.idpedido
+left join public.clientes c on c.id = p.idcliente
+left join public.bases b on b.id = m.idbase
+left join public.direccion_provincia dp
+  on dp.id = m.destino_provincia_iddireccion
+where m.es_provincia = true;
 
 create or replace view public.v_viajes_devueltos_vistageneral as
 with detalle as (
@@ -11973,11 +12601,38 @@ with movimientos as (
     mp.idbase,
     'movimiento'::text as tipomov,
     mp.id as idoperativo,
+    coalesce(nullif(btrim(mp.codigo), ''), mp.id::text) as origen_referencia,
     mp.fecharegistro as registrado_at
   from public.movimientopedidos mp
   join public.detallemovimientopedidos dmp on dmp.idmovimiento = mp.id
   where mp.estado = 'activo'
     and dmp.estado = 'activo'
+  union all
+  select
+    dmp.idproducto,
+    (-dmp.cantidad)::numeric(14,4) as cantidad,
+    mp.idbase,
+    'movimiento'::text as tipomov,
+    mp.id as idoperativo,
+    coalesce(nullif(btrim(mp.codigo), ''), mp.id::text) as origen_referencia,
+    mp.fecharegistro as registrado_at
+  from public.movimientopedidos mp
+  join public.detallemovimientopedidos dmp on dmp.idmovimiento = mp.id
+  where mp.estado = 'cancelado'
+    and dmp.estado = 'cancelado'
+  union all
+  select
+    dmp.idproducto,
+    dmp.cantidad::numeric(14,4) as cantidad,
+    mp.idbase,
+    'movimiento_rev'::text as tipomov,
+    mp.id as idoperativo,
+    coalesce(nullif(btrim(mp.codigo), ''), mp.id::text) as origen_referencia,
+    coalesce(mp.editado_at, mp.fecharegistro) as registrado_at
+  from public.movimientopedidos mp
+  join public.detallemovimientopedidos dmp on dmp.idmovimiento = mp.id
+  where mp.estado = 'cancelado'
+    and dmp.estado = 'cancelado'
   union all
   select
     cmd.idproducto,
@@ -11988,9 +12643,17 @@ with movimientos as (
     cm.idbase,
     'compra'::text as tipomov,
     cm.id as idoperativo,
+    coalesce(
+      nullif(btrim(c.observacion), ''),
+      c.correlativo::text,
+      c.id::text,
+      cm.idcompra::text,
+      cm.id::text
+    ) as origen_referencia,
     cm.registrado_at as registrado_at
   from public.compras_movimientos cm
   join public.compras_movimiento_detalle cmd on cmd.idmovimiento = cm.id
+  left join public.compras c on c.id = cm.idcompra
   union all
   select
     ad.idproducto,
@@ -11998,6 +12661,7 @@ with movimientos as (
     a.idbase,
     'ajuste'::text as tipomov,
     a.id as idoperativo,
+    coalesce(nullif(btrim(a.observacion), ''), a.id::text) as origen_referencia,
     a.registrado_at as registrado_at
   from public.ajustes a
   join public.ajustes_detalle ad on ad.idajuste = a.id
@@ -12008,6 +12672,7 @@ with movimientos as (
     t.idbase_origen,
     'trans_origen'::text as tipomov,
     t.id as idoperativo,
+    coalesce(nullif(btrim(t.observacion), ''), t.id::text) as origen_referencia,
     t.registrado_at as registrado_at
   from public.transferencias t
   join public.transferencias_detalle td on td.idtransferencia = t.id
@@ -12018,6 +12683,7 @@ with movimientos as (
     t.idbase_destino,
     'trans_destino'::text as tipomov,
     t.id as idoperativo,
+    coalesce(nullif(btrim(t.observacion), ''), t.id::text) as origen_referencia,
     t.registrado_at as registrado_at
   from public.transferencias t
   join public.transferencias_detalle td on td.idtransferencia = t.id
@@ -12028,10 +12694,14 @@ with movimientos as (
     f.idbase,
     'fabr_consumo'::text as tipomov,
     f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
     f.registrado_at as registrado_at
   from public.fabricaciones f
   join public.fabricaciones_consumos fc on fc.idfabricacion = f.id
-  where f.estado = 'activo'
   union all
   select
     fr.idproducto,
@@ -12039,10 +12709,46 @@ with movimientos as (
     f.idbase,
     'fabr_fabricado'::text as tipomov,
     f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
     f.registrado_at as registrado_at
   from public.fabricaciones f
   join public.fabricaciones_resultados fr on fr.idfabricacion = f.id
-  where f.estado = 'activo'
+  union all
+  select
+    fc.idproducto,
+    fc.cantidad::numeric(14,4),
+    f.idbase,
+    'fabr_consumo_rev'::text as tipomov,
+    f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
+    coalesce(f.editado_at, f.registrado_at) as registrado_at
+  from public.fabricaciones f
+  join public.fabricaciones_consumos fc on fc.idfabricacion = f.id
+  where f.estado = 'cancelado'
+  union all
+  select
+    fr.idproducto,
+    (-fr.cantidad)::numeric(14,4),
+    f.idbase,
+    'fabr_fabricado_rev'::text as tipomov,
+    f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
+    coalesce(f.editado_at, f.registrado_at) as registrado_at
+  from public.fabricaciones f
+  join public.fabricaciones_resultados fr on fr.idfabricacion = f.id
+  where f.estado = 'cancelado'
   union all
   select
     fmc.idproducto,
@@ -12050,10 +12756,14 @@ with movimientos as (
     f.idbase,
     'fabr_consumo'::text as tipomov,
     f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
     f.registrado_at as registrado_at
   from public.fabricaciones_maquila f
   join public.fabricaciones_maquila_consumos fmc on fmc.idfabricacion = f.id
-  where f.estado = 'activo'
   union all
   select
     fmr.idproducto,
@@ -12061,10 +12771,46 @@ with movimientos as (
     f.idbase,
     'fabr_fabricado'::text as tipomov,
     f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
     f.registrado_at as registrado_at
   from public.fabricaciones_maquila f
   join public.fabricaciones_maquila_resultados fmr on fmr.idfabricacion = f.id
-  where f.estado = 'activo'
+  union all
+  select
+    fmc.idproducto,
+    fmc.cantidad::numeric(14,4),
+    f.idbase,
+    'fabr_consumo_rev'::text as tipomov,
+    f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
+    coalesce(f.editado_at, f.registrado_at) as registrado_at
+  from public.fabricaciones_maquila f
+  join public.fabricaciones_maquila_consumos fmc on fmc.idfabricacion = f.id
+  where f.estado = 'cancelado'
+  union all
+  select
+    fmr.idproducto,
+    (-fmr.cantidad)::numeric(14,4),
+    f.idbase,
+    'fabr_fabricado_rev'::text as tipomov,
+    f.id as idoperativo,
+    coalesce(
+      nullif(btrim(f.observacion), ''),
+      f.correlativo::text,
+      f.id::text
+    ) as origen_referencia,
+    coalesce(f.editado_at, f.registrado_at) as registrado_at
+  from public.fabricaciones_maquila f
+  join public.fabricaciones_maquila_resultados fmr on fmr.idfabricacion = f.id
+  where f.estado = 'cancelado'
   union all
   select
     vdd.idproducto,
@@ -12072,6 +12818,8 @@ with movimientos as (
     coalesce(dev.idbase_retorno, mp.idbase),
     'devuelto'::text as tipomov,
     dev.id as idoperativo,
+    coalesce(nullif(btrim(dev.observacion), ''), dev.id::text)
+      as origen_referencia,
     coalesce(dev.devuelto_recibido_at, dev.editado_at, dev.registrado_at)
       as registrado_at
   from public.viajes_devueltos_detalle vdd
@@ -12085,6 +12833,7 @@ select
   m.cantidad,
   m.idbase,
   b.nombre as base_nombre,
+  m.origen_referencia,
   m.tipomov,
   m.idoperativo,
   m.registrado_at
@@ -12438,8 +13187,28 @@ select
   p.nombre as producto_nombre,
   ch.idbase,
   ch.cantidad,
-  ch.costo_unitario,
-  ch.costo_total,
+  case
+    when ch.origen_tipo = 'fabricacion_resultado'
+      and ch.accion not in ('delete','cancelar')
+      and fr.id is not null
+      then fr.costo_unitario
+    when ch.origen_tipo = 'fabricacion_maquila_resultado'
+      and ch.accion not in ('delete','cancelar')
+      and fmr.id is not null
+      then fmr.costo_unitario
+    else ch.costo_unitario
+  end as costo_unitario,
+  case
+    when ch.origen_tipo = 'fabricacion_resultado'
+      and ch.accion not in ('delete','cancelar')
+      and fr.id is not null
+      then fr.costo_total
+    when ch.origen_tipo = 'fabricacion_maquila_resultado'
+      and ch.accion not in ('delete','cancelar')
+      and fmr.id is not null
+      then fmr.costo_total
+    else ch.costo_total
+  end as costo_total,
   case
     when ch.accion = 'delete' then 'cancelar'
     when ch.accion = 'update' then 'insert'
@@ -12466,8 +13235,14 @@ left join public.productos p on p.id = ch.idproducto
 left join public.fabricaciones f
   on f.id = ch.origen_id
  and ch.origen_tipo = 'fabricacion_resultado'
+left join public.fabricaciones_resultados fr
+  on fr.id = ch.detalle_id
+ and ch.origen_tipo = 'fabricacion_resultado'
 left join public.fabricaciones_maquila fm
   on fm.id = ch.origen_id
+ and ch.origen_tipo = 'fabricacion_maquila_resultado'
+left join public.fabricaciones_maquila_resultados fmr
+  on fmr.id = ch.detalle_id
  and ch.origen_tipo = 'fabricacion_maquila_resultado'
 left join public.compras c
   on c.id = ch.origen_id
@@ -13009,6 +13784,22 @@ left join public.cuentas_contables parent on parent.id = cc.parent_id
 where cc.es_gasto_operativo is true
 order by parent.codigo, cc.codigo;
 
+create or replace view public.v_pedidos_referencia_gasto as
+select
+  p.id,
+  p.codigo,
+  p.cliente_nombre,
+  p.fechapedido,
+  p.registrado_at,
+  concat(
+    p.codigo,
+    ' / ',
+    to_char(p.fechapedido, 'YYYY-MM-DD'),
+    ' / ',
+    coalesce(p.cliente_nombre, 'Sin cliente')
+  ) as picker_label
+from public.v_pedido_vistageneral p;
+
 create or replace view public.v_finanzas_gastos_pedidos as
 select
   go.id,
@@ -13028,7 +13819,7 @@ select
   go.registrado_at,
   go.registrado_por
 from public.gastos_operativos go
-join public.pedidos p on p.id = go.idpedido
+left join public.pedidos p on p.id = go.idpedido
 left join public.clientes cli on cli.id = p.idcliente
 left join public.cuentas_bancarias cb on cb.id = go.idcuenta
 left join public.cuentas_contables cc on cc.id = go.idcuenta_contable
@@ -13125,6 +13916,28 @@ with union_data as (
   left join public.pedidos ped on ped.id = pg.idpedido
   left join public.clientes cli on cli.id = ped.idcliente
   where pg.idcuenta is not null
+  union all
+  select
+    gen_random_uuid(),
+    'pedido_pago_reverse'::text as origen,
+    pg.idpedido as referencia_id,
+    'pedido'::text as referencia_tipo,
+    pg.idcuenta,
+    null::uuid as contracuenta_id,
+    null::text as contracuenta_nombre,
+    null::uuid as idcuenta_contable,
+    null::text as cuenta_contable_codigo,
+    null::text as cuenta_contable_nombre,
+    concat('Reverse: Cobro pedido ', coalesce(cli.nombre, ''))::text as descripcion,
+    (-pg.monto)::numeric(14,2) as monto,
+    'salida'::text as sentido,
+    coalesce(pg.editado_at, pg.registrado_at) as registrado_at,
+    coalesce(pg.editado_por, pg.registrado_por) as registrado_por
+  from public.pagos pg
+  left join public.pedidos ped on ped.id = pg.idpedido
+  left join public.clientes cli on cli.id = ped.idcliente
+  where pg.idcuenta is not null
+    and pg.estado = 'cancelado'
   union all
   select
     tg.id,

@@ -4,9 +4,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 /// Reemplaza estos valores con tus credenciales de Supabase
 /// o pásalos como defines en tiempo de compilación.
-const String _defaultSupabaseUrl = 'https://hgsxkwgmxjwkbcxyabgj.supabase.co';
+const String _defaultSupabaseUrl = 'https://tprfoynewsbnwycqdznt.supabase.co';
 const String _defaultSupabaseAnonKey =
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imhnc3hrd2dteGp3a2JjeHlhYmdqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc0Nzc0NDAsImV4cCI6MjA4MzA1MzQ0MH0.CW0xlbDygxCEz7yOr0-JF2h7e6n8G9rlCQdu5zmw4sA';
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRwcmZveW5ld3Nibnd5Y3Fkem50Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc2NDYzMjgsImV4cCI6MjA4MzIyMjMyOH0.FDAWCcR0C2EA7CN9wiVOG-uMVxMeWGBPqAaIUWeFZUU';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

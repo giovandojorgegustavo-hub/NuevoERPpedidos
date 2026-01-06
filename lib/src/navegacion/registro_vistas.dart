@@ -36,6 +36,7 @@ import 'package:erp_app/src/tablas/datos/usuarios/usuarios_vista_form.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_vista_config.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_vista_form.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_detalle_vista_form.dart';
+import 'package:erp_app/src/tablas/datos/viajes/viajes_provincia_vista_form.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_devueltos_vista_config.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_devueltos_detalle_vista_form.dart';
 import 'package:erp_app/src/tablas/datos/viajes/viajes_devueltos_vista_form.dart';
@@ -194,6 +195,13 @@ final Map<String, SectionOverrides> kSectionOverrides = {
     inlineSections: const [viajesDetalleInlineSection],
     rowTransformer: viajesRowTransformer,
     groupByColumn: 'estado_grupo',
+  ),
+  'viajes_provincia': SectionOverrides(
+    formFields: viajesProvinciaVistaFormFields,
+    dataSource: viajesProvinciaDataSource,
+    tableColumns: viajesProvinciaTablaColumnas,
+    detailFields: viajesProvinciaCamposDetalle,
+    groupByColumn: 'estado_detalle',
   ),
   'viajes_bases': SectionOverrides(
     formFields: viajesBasesVistaFormFields,

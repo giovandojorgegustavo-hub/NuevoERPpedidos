@@ -18,6 +18,7 @@ const SectionDataSource historialOperacionesDataSource = SectionDataSource(
 const List<TableColumnConfig> historialOperacionesColumnas = [
   TableColumnConfig(key: 'registrado_at', label: 'Fecha de registro'),
   TableColumnConfig(key: 'base_nombre', label: 'Base'),
+  TableColumnConfig(key: 'origen_referencia', label: 'Referencia'),
   TableColumnConfig(key: 'producto_nombre', label: 'Producto'),
   TableColumnConfig(key: 'tipomov', label: 'Tipo de movimiento'),
   TableColumnConfig(key: 'cantidad', label: 'Cantidad'),
@@ -26,6 +27,7 @@ const List<TableColumnConfig> historialOperacionesColumnas = [
 const List<DetailFieldOverride> historialOperacionesCamposDetalle = [
   DetailFieldOverride(key: 'registrado_at', label: 'Fecha'),
   DetailFieldOverride(key: 'base_nombre', label: 'Base'),
+  DetailFieldOverride(key: 'origen_referencia', label: 'Referencia'),
   DetailFieldOverride(key: 'producto_nombre', label: 'Producto'),
   DetailFieldOverride(key: 'tipomov', label: 'Tipo de movimiento'),
   DetailFieldOverride(key: 'cantidad', label: 'Cantidad'),
@@ -45,6 +47,10 @@ String _friendlyMovimiento(dynamic value) {
   switch (raw) {
     case 'compra':
       return 'Compra';
+    case 'movimiento':
+      return 'Movimiento';
+    case 'movimiento_rev':
+      return 'Movimiento (revertido)';
     case 'ajuste':
       return 'Ajuste';
     case 'trans_origen':
@@ -55,6 +61,10 @@ String _friendlyMovimiento(dynamic value) {
       return 'Consumo fabricación';
     case 'fabr_fabricado':
       return 'Producto fabricado';
+    case 'fabr_consumo_rev':
+      return 'Consumo fabricación (revertido)';
+    case 'fabr_fabricado_rev':
+      return 'Producto fabricado (revertido)';
     default:
       return raw.isEmpty ? '-' : raw;
   }
